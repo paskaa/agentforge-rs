@@ -72,8 +72,12 @@ async fn main() -> anyhow::Result<()> {
             let executor = agentforge::core::executor::AgentExecutor::new(&agent, cfg).await?;
             executor.run().await?;
         }
-        Cli::Ws { agent: _ } => {
-            tracing::info!("WS listener not yet implemented in Rust — using Python bridge");
+        Cli::Ws { agent } => {
+            let cfg = agentforge::config::Config::load()?;
+            let listener = agentforge::network::ws_listener::WsListener::new(
+                &agent, &cfg.feishu.app_id, &cfg.feishu.app_secret, &cfg.redis_url(),
+            );
+            listener.run().await?;
         }
         Cli::Scheduler => {
             tracing::info!("Scheduler not yet wired — Python scheduler still active");
