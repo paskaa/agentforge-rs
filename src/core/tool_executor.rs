@@ -1,10 +1,9 @@
 //! Tool executor — runs shell scripts and returns (exit_code, stdout, stderr).
 
 use std::process::Command;
-use std::time::Duration;
 
 /// Run a shell script with arguments and optional timeout.
-pub fn run_script(script: &str, args: &[&str], timeout_secs: u64) -> (i32, String, String) {
+pub fn run_script(script: &str, args: &[&str], _timeout_secs: u64) -> (i32, String, String) {
     let output = Command::new("bash")
         .arg(script)
         .args(args)

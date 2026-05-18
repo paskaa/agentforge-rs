@@ -3,8 +3,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 
 const TRAJ_DIR: &str = "/var/lib/agentforge/trajectories";
 const INDEX_FILE: &str = "/var/lib/agentforge/trajectories/index.json";

@@ -1,9 +1,8 @@
 //! Scheduler — cron-style periodic tasks (daily reports, health checks).
 
-use chrono::{Local, NaiveTime};
+use chrono::Local;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 
 /// Scheduled task definition.
 #[derive(Debug, Clone)]

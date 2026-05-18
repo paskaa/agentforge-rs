@@ -2,9 +2,6 @@
 //!
 //! Each handler receives context and a task, processes it, and may emit follow-up tasks.
 
-use std::collections::HashMap;
-use std::process::Command;
-use std::time::Instant;
 
 /// Known human accounts — their bugs get fixed but status/assignment unchanged.
 pub const HUMAN_ACCOUNTS: &[&str] = &[
@@ -100,10 +97,10 @@ pub fn extract_reporter(msg: &str) -> String {
         if !name.is_empty() { return name; }
     }
     // Try "chenxj" format
-    if let Some(pos) = msg.find("(chenxj)") {
+    if let Some(_pos) = msg.find("(chenxj)") {
         return "chenxj".to_string();
     }
-    if let Some(pos) = msg.find("(yangkexiang)") {
+    if let Some(_pos) = msg.find("(yangkexiang)") {
         return "yangkexiang".to_string();
     }
     // Default to "chenxj" when extraction fails (prevents empty pipeline loops)

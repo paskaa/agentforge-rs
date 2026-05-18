@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use redis::AsyncCommands;
 use serde_json;
 
-use crate::core::pipeline::HUMAN_ACCOUNTS;
 
 /// All 8 agent IDs.
 pub const ALL_AGENTS: &[&str] = &[

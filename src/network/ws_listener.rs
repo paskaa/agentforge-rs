@@ -3,7 +3,6 @@
 //! Replaces the Python `ws_listener`. Uses reqwest for Feishu API,
 //! tokio-tungstenite for WebSocket, and Redis for message routing.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -64,7 +63,7 @@ impl WsListener {
             .send().await?
             .json().await?;
         
-        let token = token_resp["tenant_access_token"]
+        let _token = token_resp["tenant_access_token"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Failed to get tenant access token"))?;
         tracing::info!("[WS:{}] Token obtained", self.agent_id);

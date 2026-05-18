@@ -2,7 +2,6 @@
 //!
 //! Each agent gets its own Git worktree for isolated fixes.
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
@@ -46,7 +45,7 @@ fn run_claude_fix_impl(
     bug_id: &str,
     bug_title: &str,
     claude_fix_script: &str,
-    timeout_secs: u64,
+    _timeout_secs: u64,
 ) -> ClaudeResult {
     let start = Instant::now();
 
