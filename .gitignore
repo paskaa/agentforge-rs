@@ -1,5 +1,8 @@
 /target
 **/*.rs.bk
+**/*.bak
 .DS_Store
 *.swp
 *.swo
+.harness/PROGRESS.md
+.harness/feature_list.json

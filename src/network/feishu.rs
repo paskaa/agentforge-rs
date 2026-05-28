@@ -79,9 +79,7 @@ impl FeishuClient {
             })).unwrap_or_default(),
         });
 
-        let url = format!(
-            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
-        );
+        let url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id".to_string();
         let resp = self
             .client
             .post(&url)

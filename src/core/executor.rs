@@ -153,6 +153,7 @@ impl AgentExecutor {
         }).await.unwrap_or(None)
     }
 
+    #[allow(clippy::never_loop)]
     async fn xread_val(&mut self) -> Option<String> {
         let stream = self.fix_stream.clone();
         let last_id = self.last_stream_id.clone();
