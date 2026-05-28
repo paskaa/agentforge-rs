@@ -59,11 +59,9 @@ fn run_codex_fix_impl(
     // Load karpathy-guidelines skill into prompt
     let skill_text = std::fs::read_to_string("/root/.codex/skills/karpathy-guidelines/SKILL.md")
         .unwrap_or_default();
-    let chain_fix_text = std::fs::read_to_string("/root/.codex/skills/full-chain-fix/SKILL.md")
-        .unwrap_or_default();
     let prompt = format!(
-        "你是一个中文编程助手。使用简体中文思考和回复。\n\n{}\n{}\n\n---\n修复 Bug #{}：{}\n\n## 禅道 Bug 详情\n{}\n\n## 修复指引（TDD 流程）\n1. 从 Bug 详情中的「Suggested Code Search Keywords」选取关键词，用 rg/grep 搜索相关代码\n2. 按「Steps to Reproduce」复现问题，找到根因\n3. **先写回归测试**：打开 tests/e2e/specs/bug-regression.spec.ts，在文件末尾新增 test('#{} 问题 @bug{} @regression', async ...)，用 Playwright 模拟复现步骤断言 Bug 行为\n4. **再修代码**：按「Expected Behavior」实现正确行为\n5. **验证测试**：运行 npx playwright test --grep @bug{} 确认通过；如失败则继续修\n6. 截图链接可以 curl 查看\n请分析并直接修改文件修复。不要用 git。",
-        skill_text, chain_fix_text, bug_id, bug_title, bug_details_text, bug_id, bug_id, bug_id
+        "你是一个中文编程助手。使用简体中文思考和回复。\n\n{}\n\n---\n修复 Bug #{}：{}\n\n## 禅道 Bug 详情\n{}\n\n## 修复指引（TDD 流程）\n1. 从 Bug 详情中的「Suggested Code Search Keywords」选取关键词，用 rg/grep 搜索相关代码\n2. 按「Steps to Reproduce」复现问题，找到根因\n3. **先写回归测试**：打开 tests/e2e/specs/bug-regression.spec.ts，在文件末尾新增 test('#{} 问题 @bug{} @regression', async ...)，用 Playwright 模拟复现步骤断言 Bug 行为\n4. **再修代码**：按「Expected Behavior」实现正确行为\n5. **验证测试**：运行 npx playwright test --grep @bug{} 确认通过；如失败则继续修\n6. 截图链接可以 curl 查看\n请分析并直接修改文件修复。不要用 git。",
+        skill_text, bug_id, bug_title, bug_details_text, bug_id, bug_id, bug_id
     );
     let mut child = match Command::new("codex")
         .args(["exec", "--sandbox", "workspace-write", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-"])

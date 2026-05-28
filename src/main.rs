@@ -35,6 +35,11 @@ enum Cli {
         #[arg(long)]
         bug_id: String,
     },
+    /// Download bug attachments and analyze via LLM vision
+    AnalyzeBug {
+        #[arg(long)]
+        bug_id: String,
+    },
     /// Submit a fix task to the Redis queue
     FixBug {
         #[arg(long)]
@@ -93,6 +98,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::QueryBug { bug_id } => {
             agentforge::core::coordinator::query_bug_cli(&bug_id).await?;
+        }
+        Cli::AnalyzeBug { bug_id } => {
+            agentforge::core::coordinator::analyze_bug_cli(&bug_id).await?;
         }
         Cli::FixBug { bug_id, bug_title, fixer } => {
             agentforge::core::coordinator::submit_fix_cli(&bug_id, bug_title.as_deref().unwrap_or(""), &fixer).await?;

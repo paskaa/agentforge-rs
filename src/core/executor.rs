@@ -196,7 +196,7 @@ impl AgentExecutor {
                 let fixer = route_bug(title);
                 let task_json = pipeline::build_fix_task(bid, title, fixer);
                 let queue = format!("agent-work-queue:fix:{}", fixer);
-                let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, task_json.to_string()).await;
+                self.push_task_dedup(&queue, &task_json.to_string()).await;
             }
         }
         if self.agent_id == "liubei" { self.handle_pm_analyze("请分析和分派所有活跃 Bug").await; }
@@ -209,7 +209,7 @@ impl AgentExecutor {
             let fixer = route_bug(title);
             let task_json = pipeline::build_fix_task(bid, title, fixer);
             let queue = format!("agent-work-queue:fix:{}", fixer);
-            let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, task_json.to_string()).await;
+            self.push_task_dedup(&queue, &task_json.to_string()).await;
         }
         let reply = format!("✅ 已分析 {} 个 Bug，已分派给对应智能体。", bugs.len());
         let _ = self.feishu.send(&reply, None).await;
@@ -256,7 +256,17 @@ impl AgentExecutor {
             tracing::info!("[{}] Fix #{}: ok={} changes={} time={}ms", an, bid, r.success, r.changes, r.elapsed_ms);
             tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("claude_code"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
             let _: redis::RedisResult<()> = redis_clone.del(&format!("claude_code_lock:{}", an)).await;
-            // Kick off pipeline: zhangfei test
+
+            // 失败处理：标记 bug 并移出队列（防止协调器不断重新入队）
+            if !r.success {
+                let _: redis::RedisResult<()> = redis_clone.sadd(format!("agent-failed-bugs:{}", an), &bid).await;
+                // 从队列中移除（按内容匹配删除当前这个任务）
+                let queue_key = format!("agent-work-queue:fix:{}", an);
+                let _: redis::RedisResult<i64> = redis_clone.lrem(&queue_key, 1, &m).await;
+                tracing::info!("[{}] Bug #{} fix failed, removed from queue and added to failed set", an, bid);
+            }
+
+            // 管道：成功时触发张飞测试
             if r.success {
                 // Dedup: only trigger pipeline once per bug (Redis key with 24h TTL)
                 let pipeline_key = format!("pipeline_sent:{}", bid);
@@ -284,12 +294,111 @@ impl AgentExecutor {
     async fn handle_pipeline_test(&self, msg: &str) {
         let bid = pipeline::extract_bug_id(msg); let rep = pipeline::extract_reporter(msg);
         tracing::info!("[zhangfei] Testing Bug #{}", bid);
-        let test_doc = format!("# 测试文档 — Bug #{}\n\n{}\n\n## 验收标准\n- [ ] 功能正常", bid, msg);
-        let _: redis::RedisResult<()> = self.redis.clone().set(format!("test_doc:{}", bid), &test_doc).await;
-        if pipeline::is_human(&rep) { let _ = self.feishu.send(&format!("Bug #{} 测试完成（人类 {}，跳过指派）。", bid, rep), None).await; return; }
-        let _ = tokio::process::Command::new("bash").arg("-c").arg(format!("{}/zentao-write-bug.sh assign {} {} '验证确认'", self.zentao_dir, bid, rep)).output().await;
-        let _ = self.feishu.send(&format!("Bug #{} 测试完成，已指派回 {}。", bid, rep), None).await;
-        self.traces.log("zhangfei", "test_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok")).await;
+        // 检查重试次数
+        let retry_key = format!("pipeline_retry:{}", bid);
+        let retry_count: i32 = self.redis.clone().get(&retry_key).await.unwrap_or(0);
+        let max_retries = 3;
+
+        if retry_count >= max_retries {
+            tracing::warn!("[zhangfei] Bug #{} exceeded max retries ({})", bid, max_retries);
+            let _ = self.feishu.send(&format!("⚠️ Bug #{} 修复测试失败超过 {} 次，请人工介入。", bid, max_retries), None).await;
+            return;
+        }
+
+        // 确保前端 dev server 在运行
+        let _ = tokio::process::Command::new("bash")
+            .arg("/root/.openclaw/workspace/scripts/ensure-frontend.sh")
+            .output().await;
+
+        // 运行 Playwright 回归测试（单 worker 避免压垮 dev server）
+        let test_result = tokio::time::timeout(
+            Duration::from_secs(120),
+            tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1", bid))
+                .output()
+        ).await;
+
+        let (test_passed, test_output) = match test_result {
+            Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()),
+            Ok(Err(e)) => (false, format!("spawn error: {}", e)),
+            Err(_) => (false, "timeout after 120s".to_string()),
+        };
+
+        if test_passed {
+            tracing::info!("[zhangfei] Bug #{} Playwright test PASSED", bid);
+            let _ = self.feishu.send(&format!("✅ Bug #{} 回归测试通过。", bid), None).await;
+
+            // 清理重试计数
+            let _: redis::RedisResult<()> = self.redis.clone().del(&retry_key).await;
+
+            // 提取测试结果摘要（取测试输出的关键行）
+            let _test_summary: String = test_output.lines()
+                .filter(|l| l.contains("passed") || l.contains("failed") || l.contains("Pending") || l.contains("✓") || l.contains("✗"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _test_comment = format!(
+                "=== Playwright 回归测试结果 ===\n测试标签: @bug{}\n执行模式: 无头浏览器 (chromium)\n\n{}\n\n✅ 全部测试通过",
+                bid, _test_summary
+            );
+            // 禅道标记为已解决（comment 已内嵌在 resolve 中）
+            let _ = tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{}/zentao-write-bug.sh resolve {} 'Playwright回归测试通过，BUG已修复'", self.zentao_dir, bid))
+                .output().await;
+
+            // 保存测试文档
+            let test_doc = format!("# Bug #{} 回归测试\n\n**Playwright 测试通过**\n\n测试标签: @bug{}", bid, bid);
+            let _: redis::RedisResult<()> = self.redis.clone().set_ex(format!("test_doc:{}", bid), &test_doc, 86400).await;
+
+            // 通知下一阶段（huatuo 验收 + chenlin 归档）
+            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+            let next_msg = format!("Bug #{} 测试完成，请验收。提出人: {}。", bid, rep);
+            for next_agent in &["huatuo", "chenlin"] {
+                let pipe_task = serde_json::json!({
+                    "agent_id": next_agent,
+                    "message": &next_msg,
+                    "source": "pipeline_test_done",
+                    "sender_id": "zhangfei",
+                    "bug_reporter": &rep,
+                    "msg_id": format!("pipeline-test-done-{}-{}", bid, chrono::Utc::now().timestamp()),
+                    "timestamp": &ts,
+                    "chat_id": "", "is_dm": "true",
+                });
+                let _: redis::RedisResult<i64> = self.redis.clone().rpush(
+                    &format!("agent-work-queue:fix:{}", next_agent),
+                    pipe_task.to_string()
+                ).await;
+            }
+        } else {
+            // 测试失败：增加重试计数，推回给 fixer 重修
+            let new_count = retry_count + 1;
+            let _: redis::RedisResult<()> = self.redis.clone().set(&retry_key, new_count).await;
+            let _: redis::RedisResult<()> = self.redis.clone().expire(&retry_key, 86400).await;
+
+            tracing::warn!("[zhangfei] Bug #{} Playwright test FAILED (attempt {}/{})", bid, new_count, max_retries);
+            let _ = self.feishu.send(&format!("⚠️ Bug #{} 回归测试失败（第 {}/{} 次），已退回修复。\n```\n{}\n```",
+                bid, new_count, max_retries, &test_output.chars().take(500).collect::<String>()), None).await;
+
+            // 失败信息由飞书通知，不单独写禅道（避免干扰禅道状态）
+
+            // 从消息中提取原 fixer agent_id
+            let sender = msg.split("sender_id:").nth(1).and_then(|s| s.split(',').next()).map(|s| s.trim().trim_matches('"')).unwrap_or("zhaoyun");
+            let rework_task = serde_json::json!({
+                "agent_id": sender,
+                "message": format!("请重新修复 Bug #{}。回归测试未通过，需继续修改代码直到测试通过。\n测试输出：\n{}", bid, test_output.chars().take(300).collect::<String>()),
+                "source": "pipeline_retry",
+                "sender_id": "zhangfei",
+                "msg_id": format!("pipeline-retry-{}-{}", bid, chrono::Utc::now().timestamp()),
+                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "chat_id": "", "is_dm": "true",
+            });
+            let _: redis::RedisResult<i64> = self.redis.clone().rpush(
+                &format!("agent-work-queue:fix:{}", sender),
+                rework_task.to_string()
+            ).await;
+        }
+        self.traces.log("zhangfei", "test_done", Some(&format!("Bug#{}", bid)), Some(if test_passed {"pass"} else {"fail"}), None, None, None, Some(if test_passed {"ok"} else {"failed"})).await;
     }
 
     async fn handle_pipeline_verify(&self, msg: &str) {
@@ -310,6 +419,42 @@ impl AgentExecutor {
         let _ = self.feishu.send(&format!("📚 Bug #{} 文档已归档。", bid), None).await;
         self.traces.log("chenlin", "doc_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok")).await;
     }
+    /// Push a task to an agent queue with dedup: removes any existing entry for same bug ID first.
+    async fn push_task_dedup(&self, queue: &str, task_json: &str) {
+        let bid = task_json.split("#").nth(1)
+            .and_then(|s| s.split(|c: char| c == ']' || c == '：' || c == ':' || c == ' ' || c == '"').next())
+            .unwrap_or("")
+            .to_string();
+        
+        // 跳过已失败的 bug（不超过10次重试）
+        if !bid.is_empty() {
+            let agent = queue.strip_prefix("agent-work-queue:fix:").unwrap_or("");
+            let failed_count: i32 = self.redis.clone().scard(format!("agent-failed-bugs:{}", agent)).await.unwrap_or(0);
+            if failed_count > 0 {
+                let is_failed: bool = self.redis.clone().sismember(format!("agent-failed-bugs:{}", agent), &bid).await.unwrap_or(false);
+                if is_failed {
+                    tracing::info!("Skipping Bug #{} (in failed set for {})", bid, agent);
+                    return;
+                }
+            }
+        }
+        
+        if !bid.is_empty() && bid.chars().all(|c| c.is_ascii_digit()) {
+            // 扫描队列中已有的同 bug 任务，删除旧的
+            let len: i64 = self.redis.clone().llen(queue).await.unwrap_or(0);
+            for i in 0..len {
+                let item: Option<String> = self.redis.clone().lindex(queue, i as isize).await.unwrap_or(None);
+                if let Some(item_str) = item {
+                    if item_str.contains(&format!("#{}", bid)) {
+                        let _: redis::RedisResult<i64> = self.redis.clone().lrem(queue, 1, &item_str).await;
+                        break;
+                    }
+                }
+            }
+        }
+        let _: redis::RedisResult<i64> = self.redis.clone().rpush(queue, task_json).await;
+    }
+
 
     /// Detect pipeline trigger intent from a chat message.
     /// Returns true if the message triggered a pipeline action (and thus should NOT go to Hermes).
@@ -373,7 +518,7 @@ impl AgentExecutor {
                     let fixer = route_bug(title);
                     let task_json = pipeline::build_fix_task(bid, title, fixer);
                     let queue = format!("agent-work-queue:fix:{}", fixer);
-                    let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, task_json.to_string()).await;
+                    self.push_task_dedup(&queue, &task_json.to_string()).await;
                     let _ = self.feishu.send(&format!("🔧 Bug #{} 已转发给 {} 修复。", bid, fixer),
                         if task.chat_id.is_empty() { None } else { Some(task.chat_id.as_str()) }).await;
                     return true;

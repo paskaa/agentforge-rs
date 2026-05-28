@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_save_and_get_trajectory() {
-        let tmp = env::temp_dir().join("traj_test");
+        let _tmp = env::temp_dir().join("traj_test");
         // Use tmp dir via TRAJ_DIR override not possible; test on temp path
         let bug_id = "99999";
         let r = save_trajectory(bug_id, "赵云", "claude_code", true, 45.0,

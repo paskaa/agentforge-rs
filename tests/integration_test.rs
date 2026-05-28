@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use agentforge::config::Config;
-    use agentforge::core::coordinator::{self, route_bug};
+    use agentforge::core::coordinator::{self};
     use agentforge::core::executor::AgentExecutor;
     use agentforge::core::pipeline;
     use agentforge::core::trace::TraceStore;

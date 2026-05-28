@@ -3,9 +3,7 @@
 //! Replaces the Python `ws_listener`. Uses reqwest for Feishu API,
 //! tokio-tungstenite for WebSocket, and Redis for message routing.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use std::time::Duration;
 
 const AGENT_MAP: &[(&str, &str)] = &[
     ("诸葛亮", "zhugeliang"), ("刘备", "liubei"),
@@ -19,7 +17,6 @@ pub struct WsListener {
     pub app_id: String,
     pub app_secret: String,
     pub redis_url: String,
-    last_msg_time: Arc<Mutex<Instant>>,
 }
 
 impl WsListener {
@@ -29,7 +26,6 @@ impl WsListener {
             app_id: app_id.to_string(),
             app_secret: app_secret.to_string(),
             redis_url: redis_url.to_string(),
-            last_msg_time: Arc::new(Mutex::new(Instant::now())),
         }
     }
 

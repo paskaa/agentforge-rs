@@ -22,7 +22,7 @@ const EXPERTISE: &[(&str, &[&str])] = &[
     ("xunyu", &["数据库", "sql", "慢查询", "索引", "表", "字段缺失", "ddl", "schema"]),
     ("guanyu", &["后端", "java", "api", "接口", "服务", "spring", "service", "controller",
                   "mapper", "后端报错", "保存失败", "事务", "缓存", "校验", "签发",
-                  "退回", "审计", "完诊", "div_log", "SQL", "执行科室", "库存",
+                  "退回", "撤回", "错误提示", "审计", "完诊", "操作失败", "div_log", "SQL", "执行科室", "库存",
                   "发药", "计费"]),
     ("zhaoyun", &["前端", "vue", "界面", "显示", "弹窗", "按钮", "列表", "回显",
                   "刷新", "不规范", "缺失", "操作项", "字段", "命名", "加载",
@@ -57,105 +57,8 @@ impl Coordinator {
             .arg("zhangfei")
             .output();
     }
-
-    /// Scan all agent bugs and dispatch to fixer queues.
-    ///
-    /// Returns count of dispatched bugs.
-    pub async fn scan_and_dispatch(
-        &mut self,
-        redis: &mut redis::aio::MultiplexedConnection,
-        min_interval: u64,
-    ) -> u64 {
-        let now = Instant::now();
-        if now.duration_since(self.last_scan).as_secs() < min_interval {
-            return 0;
-        }
-        self.last_scan = now;
-
-        tracing::info!("[coordinator] Scanning all agent bugs...");
-
-        let mut total = 0u64;
-        let mut liubei_bugs: Vec<(String, String)> = vec![];
-
-        for account in ALL_AGENTS {
-            self.refresh_token();
-            let script = self.zentao_dir.join("zentao-my-bugs.sh");
-            let output = Command::new("bash")
-                .arg(&script)
-                .arg(account)
-                .arg("active")
-                .output();
-
-            let stdout = match output {
-                Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-                Err(_) => continue,
-            };
-
-            // Skip if no bugs
-            if stdout.contains("没有未解决的 Bug") {
-                continue;
-            }
-
-            // Parse: "  1. #455 [一般] Title..."
-            for line in stdout.lines() {
-                if let Some(bid) = parse_bug_line(line) {
-                    let title = line.split(']').nth(1).unwrap_or("").trim().to_string();
-                    if *account == "liubei" {
-                        liubei_bugs.push((bid, title));
-                    } else {
-                        // Route to fixer
-                        let fixer = route_bug(&title);
-                        let msg = serde_json::json!({
-                            "agent_id": fixer,
-                            "message": format!("请修复 Bug #{}：{}", bid, title),
-                            "source": "coordinator_scan",
-                            "sender_id": "coordinator",
-                            "chat_id": "",
-                            "is_dm": "true",
-                            "msg_id": format!("coord-{}-{}", bid, chrono::Utc::now().timestamp()),
-                            "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
-                        });
-
-                        let queue = format!("agent-work-queue:fix:{}", fixer);
-                        let _: redis::RedisResult<i64> = redis
-                            .rpush(&queue, msg.to_string())
-                            .await;
-
-                        total += 1;
-                    }
-                }
-            }
-        }
-
-        // Batch PM analysis: send all liubei bugs at once
-        if !liubei_bugs.is_empty() {
-            let bug_lines: Vec<String> = liubei_bugs
-                .iter()
-                .map(|(bid, title)| format!("  #{}：{}", bid, title))
-                .collect();
-            let msg = serde_json::json!({
-                "agent_id": "liubei",
-                "message": format!("请分析并分派以下 {} 个 Bug：\n{}", liubei_bugs.len(), bug_lines.join("\n")),
-                "source": "pm_analyze",
-                "sender_id": "coordinator",
-                "chat_id": "",
-                "is_dm": "true",
-                "msg_id": format!("pm-batch-{}", chrono::Utc::now().timestamp()),
-                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
-            });
-
-            let _: redis::RedisResult<i64> = redis
-                .rpush("agent-work-queue", msg.to_string())
-                .await;
-            total += liubei_bugs.len() as u64;
-        }
-
-        tracing::info!("[coordinator] Dispatched {} bugs", total);
-        total
-    }
 }
-
-/// Parse bug ID from zentao-my-bugs output line.
+#[allow(dead_code)]
 fn parse_bug_line(line: &str) -> Option<String> {
     let line = line.trim();
     if !line.starts_with(|c: char| c.is_ascii_digit()) {
@@ -217,7 +120,7 @@ pub async fn scan_bugs_cli() -> anyhow::Result<()> {
 /// Query a single bug and print detail to stdout.
 pub async fn query_bug_cli(bug_id: &str) -> anyhow::Result<()> {
     let Ok(out) = Command::new("bash")
-        .arg(format!("{}/zentao-bug-detail.sh", ZENTAO_DIR))
+        .arg(format!("{}/zentao-bug-query.sh", ZENTAO_DIR))
         .arg(bug_id)
         .output()
     else {
@@ -319,4 +222,25 @@ mod tests {
         assert_eq!(route_bug("数据库查询慢性能优化"), "xunyu");
         assert_eq!(route_bug("前端vue组件渲染问题"), "zhaoyun");
     }
+}
+
+/// Download bug attachments and analyze via LLM vision.
+pub async fn analyze_bug_cli(bug_id: &str) -> anyhow::Result<()> {
+    let Ok(out) = Command::new("bash")
+        .arg(format!("{}/zentao-bug-analyze.sh", ZENTAO_DIR))
+        .arg(bug_id)
+        .output()
+    else {
+        println!("分析 Bug #{} 失败", bug_id);
+        return Ok(());
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    println!("{}", stdout.trim());
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("stderr: {}", stderr.trim());
+        }
+    }
+    Ok(())
 }
