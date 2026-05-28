@@ -205,25 +205,6 @@ pub fn list_agents_cli() {
     println!("  陈琳(chenlin): 文档归档");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_bug_line() {
-        assert_eq!(parse_bug_line("  1. #455 [一般] 测试标题"), Some("455".into()));
-        assert_eq!(parse_bug_line("No bug here"), None);
-    }
-
-    #[test]
-    fn test_route_bug() {
-        assert_eq!(route_bug("前端vue界面显示异常"), "zhaoyun");
-        assert_eq!(route_bug("后端api接口报500错误"), "guanyu");
-        assert_eq!(route_bug("数据库查询慢性能优化"), "xunyu");
-        assert_eq!(route_bug("前端vue组件渲染问题"), "zhaoyun");
-    }
-}
-
 /// Download bug attachments and analyze via LLM vision.
 pub async fn analyze_bug_cli(bug_id: &str) -> anyhow::Result<()> {
     let Ok(out) = Command::new("bash")
@@ -244,3 +225,160 @@ pub async fn analyze_bug_cli(bug_id: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+
+/// Parse a bug line like "1. #503 [严重] Title..." into (bug_id, title).
+fn parse_bug_line_full(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if !line.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    // "1. #503 [严重] 发药明细与发药汇总单..."
+    let after_hash = line.split('#').nth(1)?;
+    // after_hash = "503 [严重] 发药明细..."
+    let bug_id = after_hash.split(char::is_whitespace).next()?.to_string();
+    // Extract title: skip "#503 " then remove "[严重] " prefix
+    let after_id = after_hash.trim_start_matches(|c: char| !c.is_whitespace()).trim_start();
+    // after_id = "[严重] 发药明细..."
+    // Remove "[XXX] " prefix
+    let title = if let Some(bracket_end) = after_id.find(']') {
+        after_id[bracket_end+1..].trim().to_string()
+    } else {
+        after_id.to_string()
+    };
+    if title.is_empty() { None } else { Some((bug_id, title)) }
+}
+
+/// Result of a single pipeline fix attempt.
+#[derive(Debug, Clone)]
+pub struct PipelineFixResult {
+    pub bug_id: String,
+    pub bug_title: String,
+    pub fixer: String,
+    pub success: bool,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+/// Run the full pipeline: scan all active bugs → fix each one sequentially.
+pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Result<()> {
+    let agents = ["zhaoyun", "guanyu", "xunyu"];
+    
+    // Step 1: Refresh Zentao token
+    let _ = std::process::Command::new("bash")
+        .arg(format!("{}/zentao-token-refresh.sh", ZENTAO_DIR))
+        .arg("zhangfei")
+        .output();
+    
+    // Step 2: Scan all agents for bugs
+    let mut all_bugs: Vec<(String, String, String)> = Vec::new();
+    for agent in &agents {
+        let Ok(out) = std::process::Command::new("bash")
+            .arg(format!("{}/zentao-my-bugs.sh", ZENTAO_DIR))
+            .arg(agent)
+            .arg("active")
+            .output()
+        else { continue; };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.contains("没有未解决的 Bug") || stdout.trim().is_empty() {
+            continue;
+        }
+        for line in stdout.lines() {
+            if let Some((bug_id, title)) = parse_bug_line_full(line) {
+                all_bugs.push((bug_id, title, agent.to_string()));
+            }
+        }
+    }
+    
+    if all_bugs.is_empty() {
+        println!("🔍 当前没有活跃的 Bug。");
+        return Ok(());
+    }
+    
+    let total = all_bugs.len().min(max_bugs);
+    println!("🔍 扫描完成：共 {} 个活跃 Bug（本次处理 {} 个）", all_bugs.len(), total);
+    println!("{}
+", "=".repeat(60));
+    
+    // Step 3: Fix each bug sequentially
+    let mut results: Vec<PipelineFixResult> = Vec::new();
+    for (i, (bug_id, bug_title, fixer)) in all_bugs.iter().take(max_bugs).enumerate() {
+        println!("[{}/{}] 🛠️  处理 Bug #{} — {}", i + 1, total, bug_id, bug_title);
+        println!("    修复者: {}", fixer);
+        println!("{}", "-".repeat(40));
+        
+        let start = std::time::Instant::now();
+        let result = crate::core::subagent::run_claude_fix_sync(
+            fixer,
+            bug_id,
+            bug_title,
+            "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh",
+            10800,
+        );
+        
+        let elapsed = start.elapsed().as_secs();
+        let result_entry = PipelineFixResult {
+            bug_id: bug_id.clone(),
+            bug_title: bug_title.clone(),
+            fixer: fixer.clone(),
+            success: result.success,
+            elapsed_ms: result.elapsed_ms,
+            error: if result.success { None } else { Some(result.stderr.chars().take(200).collect()) },
+        };
+        results.push(result_entry);
+        
+        if result.success {
+            println!("✅ Bug #{} 修复完成（{} 秒，{} 个文件变更）", bug_id, elapsed, result.changes);
+        } else {
+            println!("❌ Bug #{} 修复失败（{} 秒）", bug_id, elapsed);
+        }
+        println!("{}
+", "=".repeat(60));
+    }
+    
+    // Step 4: Summary
+    let success_count = results.iter().filter(|r| r.success).count();
+    let fail_count = results.iter().filter(|r| !r.success).count();
+    println!("📊 执行汇总");
+    println!("  总数: {} / 成功: {} / 失败: {}", results.len(), success_count, fail_count);
+    if fail_count > 0 {
+        println!("
+❌ 失败的 Bug:");
+        for r in results.iter().filter(|r| !r.success) {
+            println!("  Bug #{} [{}]: {}", r.bug_id, r.fixer, r.bug_title);
+            if let Some(ref err) = r.error {
+                println!("    原因: {}", err);
+            }
+        }
+    }
+    if success_count > 0 {
+        println!("
+✅ 成功的 Bug:");
+        for r in results.iter().filter(|r| r.success) {
+            println!("  Bug #{} [{}]: {} ({}ms)", r.bug_id, r.fixer, r.bug_title, r.elapsed_ms);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_bug_line() {
+        assert_eq!(parse_bug_line("  1. #455 [一般] 测试标题"), Some("455".into()));
+        assert_eq!(parse_bug_line("No bug here"), None);
+    }
+
+    #[test]
+    fn test_route_bug() {
+        assert_eq!(route_bug("前端vue界面显示异常"), "zhaoyun");
+        assert_eq!(route_bug("后端api接口报500错误"), "guanyu");
+        assert_eq!(route_bug("数据库查询慢性能优化"), "xunyu");
+        assert_eq!(route_bug("前端vue组件渲染问题"), "zhaoyun");
+    }
+}
+
+

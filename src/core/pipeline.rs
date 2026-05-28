@@ -83,7 +83,7 @@ pub fn extract_reporter(msg: &str) -> String {
         let after = &msg[pos + "提出人".len()..];
         let after = after.trim_start_matches(&[':', '：', ' '][..]);
         // Take until period or newline
-        let end = after.find(|c: char| c == '。' || c == '\n')
+        let end = after.find(['。', '\n'])
             .unwrap_or(after.len());
         let name = after[..end].trim().to_string();
         if !name.is_empty() { return name; }
@@ -92,7 +92,7 @@ pub fn extract_reporter(msg: &str) -> String {
     if let Some(pos) = msg.find("已指派回") {
         let after = &msg[pos + "已指派回".len()..];
         let after = after.trim_start_matches(&[' ', '：', ':'][..]);
-        let end = after.find(|c: char| c == '。' || c == '\n').unwrap_or(after.len());
+        let end = after.find(['。', '\n']).unwrap_or(after.len());
         let name = after[..end].trim().to_string();
         if !name.is_empty() { return name; }
     }

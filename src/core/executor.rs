@@ -250,13 +250,13 @@ impl AgentExecutor {
                 Err(panic) => {
                     let msg = if let Some(s) = panic.downcast_ref::<String>() { s.clone() } else { "panic".into() };
                     tracing::error!("[{}] Claude Code panic for #{}: {}", an, bid, msg);
-                    let _: redis::RedisResult<()> = redis_clone.del(&format!("claude_code_lock:{}", an)).await;
+                    let _: redis::RedisResult<()> = redis_clone.del(format!("claude_code_lock:{}", an)).await;
                     return;
                 }
             };
             tracing::info!("[{}] Fix #{}: ok={} changes={} time={}ms", an, bid, r.success, r.changes, r.elapsed_ms);
             tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("claude_code"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
-            let _: redis::RedisResult<()> = redis_clone.del(&format!("claude_code_lock:{}", an)).await;
+            let _: redis::RedisResult<()> = redis_clone.del(format!("claude_code_lock:{}", an)).await;
 
             // 失败处理：标记 bug 并移出队列（防止协调器不断重新入队）
             if !r.success {
@@ -367,7 +367,7 @@ impl AgentExecutor {
                     "chat_id": "", "is_dm": "true",
                 });
                 let _: redis::RedisResult<i64> = self.redis.clone().rpush(
-                    &format!("agent-work-queue:fix:{}", next_agent),
+                    format!("agent-work-queue:fix:{}", next_agent),
                     pipe_task.to_string()
                 ).await;
             }
@@ -395,7 +395,7 @@ impl AgentExecutor {
                 "chat_id": "", "is_dm": "true",
             });
             let _: redis::RedisResult<i64> = self.redis.clone().rpush(
-                &format!("agent-work-queue:fix:{}", sender),
+                format!("agent-work-queue:fix:{}", sender),
                 rework_task.to_string()
             ).await;
         }
@@ -423,7 +423,7 @@ impl AgentExecutor {
     /// Push a task to an agent queue with dedup: removes any existing entry for same bug ID first.
     async fn push_task_dedup(&self, queue: &str, task_json: &str) {
         let bid = task_json.split("#").nth(1)
-            .and_then(|s| s.split(|c: char| c == ']' || c == '：' || c == ':' || c == ' ' || c == '"').next())
+            .and_then(|s| s.split([']', '：', ':', ' ', '"']).next())
             .unwrap_or("")
             .to_string();
         
@@ -495,7 +495,7 @@ impl AgentExecutor {
             };
             
             tracing::info!("[{}] 🎯 Pipeline triggered: 分配Bug (human={:?})", self.agent_id, target_human);
-            let _ = self.feishu.send(&format!("🔍 收到分配指令，正在扫描 Bug..."), 
+            let _ = self.feishu.send(&"🔍 收到分配指令，正在扫描 Bug...".to_string(), 
                 if task.chat_id.is_empty() { None } else { Some(task.chat_id.as_str()) }).await;
             
             self.run_coordinator_scan().await;
@@ -504,7 +504,7 @@ impl AgentExecutor {
         
         // ── Trigger 2: "修复 Bug #XXX" or "修复 #XXX" → direct fix task dispatch ──
         if (msg_lower.contains("修复 bug") || msg_lower.contains("修复 #") || msg_lower.contains("修复bug"))
-            && pipeline::parse_bugs_from_message(msg).first().is_some()
+            && !pipeline::parse_bugs_from_message(msg).is_empty()
         {
             if self.is_fixer {
                 tracing::info!("[{}] 🎯 Pipeline triggered: 直接修复 Bug", self.agent_id);

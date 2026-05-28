@@ -19,20 +19,43 @@
       "priority": 1,
       "area": "harness",
       "title": "Harness Engineering 基础设施搭建",
-      "status": "passed",
+      "status": "done",
       "verification": [
         "AGENTS.md 包含 5 子系统模型",
         ".harness/ 包含 init.sh / PROGRESS.md / feature_list.json",
         "cargo check 编译通过",
-        "cargo test 测试通过"
+        "cargo test 全部通过",
+        "cargo clippy 无错误"
       ],
       "evidence": [
         "AGENTS.md created (180 lines)",
         ".harness/ templates installed",
         "cargo check ✅",
-        "cargo test 29/29 ✅"
+        "cargo test 33/33 ✅",
+        "cargo clippy ✅ (3 warnings)",
+        "skills 已安装: harness-engineering, walkinglabs-harness, durable-execution, closed-loop-testing, constraint-design, review-audit"
       ],
       "notes": ""
+    },
+    {
+      "id": "afrs-002",
+      "priority": 2,
+      "area": "codex",
+      "title": "Codex-Aliyun 自动修复链路",
+      "status": "in_progress",
+      "verification": [
+        "build_harness_prompt() 包含全部 8 个技能",
+        "run_codex_fix_impl() 调用 codex-aliyun 脚本",
+        "修复后运行 run_quality_gates()",
+        "codex-aliyun 脚本在 /usr/local/bin/codex-aliyun"
+      ],
+      "evidence": [
+        "subagent.rs 包含 build_harness_prompt ✅",
+        "subagent.rs 包含 run_codex_fix_impl ✅",
+        "subagent.rs 包含 run_quality_gates ✅",
+        "codex-aliyun 脚本已创建 ✅"
+      ],
+      "notes": "需要验证端到端修复流程"
     }
   ]
 }

@@ -56,6 +56,13 @@ enum Cli {
         #[arg(long)]
         fixer: String,
     },
+    /// Run full pipeline: scan → fix → verify for all active bugs (one at a time)
+    Pipeline {
+        #[arg(long, default_value = "10")]
+        max_bugs: usize,
+        #[arg(long, default_value = "guanyu")]
+        default_fixer: String,
+    },
     /// List all agents and their expertise
     ListAgents,
 }
@@ -107,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::AssignBug { bug_id, fixer } => {
             agentforge::core::coordinator::assign_bug_cli(&bug_id, &fixer).await?;
+        }
+        Cli::Pipeline { max_bugs, default_fixer } => {
+            agentforge::core::coordinator::pipeline_cli(max_bugs, &default_fixer).await?;
         }
         Cli::ListAgents => {
             agentforge::core::coordinator::list_agents_cli();
