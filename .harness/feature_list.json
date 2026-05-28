@@ -1,0 +1,38 @@
+{
+  "project": "agentforge-rs",
+  "last_updated": "2026-05-28",
+  "rules": {
+    "single_active_feature": true,
+    "passing_requires_evidence": true,
+    "do_not_skip_verification": true
+  },
+  "status_legend": {
+    "not_started": "功能还没开始做",
+    "in_progress": "当前唯一正在进行的任务",
+    "passed": "验证已通过，证据已记录",
+    "blocked": "有已记录的阻塞问题",
+    "done": "已完成并合入主干"
+  },
+  "features": [
+    {
+      "id": "afrs-001",
+      "priority": 1,
+      "area": "harness",
+      "title": "Harness Engineering 基础设施搭建",
+      "status": "passed",
+      "verification": [
+        "AGENTS.md 包含 5 子系统模型",
+        ".harness/ 包含 init.sh / PROGRESS.md / feature_list.json",
+        "cargo check 编译通过",
+        "cargo test 测试通过"
+      ],
+      "evidence": [
+        "AGENTS.md created (180 lines)",
+        ".harness/ templates installed",
+        "cargo check ✅",
+        "cargo test 29/29 ✅"
+      ],
+      "notes": ""
+    }
+  ]
+}
