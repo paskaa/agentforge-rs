@@ -21,19 +21,19 @@
       "title": "Harness Engineering 基础设施搭建",
       "status": "done",
       "verification": [
-        "AGENTS.md 包含 5 子系统模型",
-        ".harness/ 包含 init.sh / PROGRESS.md / feature_list.json",
+        "AGENTS.md 包含 5 子系统模型 + 4 大支柱 + 全链路 6 环",
+        ".harness/ 包含 init.sh / PROGRESS.md / feature_list.json / clean-state-checklist.md",
         "cargo check 编译通过",
         "cargo test 全部通过",
         "cargo clippy 无错误"
       ],
       "evidence": [
-        "AGENTS.md created (180 lines)",
-        ".harness/ templates installed",
+        "AGENTS.md 304 行（v2.0）",
+        ".harness/ 模板全部安装",
         "cargo check ✅",
         "cargo test 33/33 ✅",
-        "cargo clippy ✅ (3 warnings)",
-        "skills 已安装: harness-engineering, walkinglabs-harness, durable-execution, closed-loop-testing, constraint-design, review-audit"
+        "cargo clippy ✅（仅 pre-existing warnings）",
+        "8 个 harness skills 已安装并集成到 prompt"
       ],
       "notes": ""
     },
@@ -41,21 +41,94 @@
       "id": "afrs-002",
       "priority": 2,
       "area": "codex",
-      "title": "Codex-Aliyun 自动修复链路",
-      "status": "in_progress",
+      "title": "Codex-Aliyun 自动修复链路（完整闭环）",
+      "status": "done",
       "verification": [
         "build_harness_prompt() 包含全部 8 个技能",
         "run_codex_fix_impl() 调用 codex-aliyun 脚本",
         "修复后运行 run_quality_gates()",
-        "codex-aliyun 脚本在 /usr/local/bin/codex-aliyun"
+        "修复后运行 auto_commit_fix() → git push",
+        "修复后运行 resolve_bug_in_zentao() → 结构化备注",
+        "extract_fix_details() 能从 stdout 提取根因和修复方案"
       ],
       "evidence": [
-        "subagent.rs 包含 build_harness_prompt ✅",
-        "subagent.rs 包含 run_codex_fix_impl ✅",
-        "subagent.rs 包含 run_quality_gates ✅",
-        "codex-aliyun 脚本已创建 ✅"
+        "subagent.rs: build_harness_prompt ✅",
+        "subagent.rs: run_codex_fix_impl ✅",
+        "subagent.rs: run_quality_gates ✅",
+        "subagent.rs: auto_commit_fix (git push) ✅",
+        "subagent.rs: resolve_bug_in_zentao ✅",
+        "subagent.rs: extract_fix_details + build_zentao_comment ✅",
+        "codex-aliyun 脚本存在 ✅",
+        "cargo check ✅, cargo test 33/33 ✅"
       ],
-      "notes": "需要验证端到端修复流程"
+      "notes": "全链路闭环完成：Codex 修复 → 质量门禁 → git commit+push → Zentao resolve(结构化备注)"
+    },
+    {
+      "id": "afrs-003",
+      "priority": 3,
+      "area": "pipeline",
+      "title": "Pipeline 管线（多 Agent 接力）",
+      "status": "done",
+      "verification": [
+        "pipeline_cli() 扫描所有 Agent 的活跃 Bug",
+        "通过 Redis 队列分发（非直接调用）",
+        "轮询 pipeline:result 等待结果",
+        "Fixer 完成 → zhangfei 测试 → huatuo 验收 → chenlin 归档",
+        "测试失败 → 退回重修（最多 3 次）"
+      ],
+      "evidence": [
+        "coordinator.rs: pipeline_cli() ✅",
+        "coordinator.rs: Redis rpush + 轮询 ✅",
+        "executor.rs: pipeline:result 写入 ✅",
+        "executor.rs: zhangfei Playwright 测试 ✅",
+        "executor.rs: 重试/退回机制 ✅",
+        "executor.rs: huatuo 验收 + chenlin 归档 ✅",
+        "cargo check ✅, cargo test 33/33 ✅"
+      ],
+      "notes": "管线完整：扫描 → 队列 → Fix → 测试 → 验收 → 归档"
+    },
+    {
+      "id": "afrs-004",
+      "priority": 4,
+      "area": "harness",
+      "title": "多 Agent 差异化（Prompt + 约束 + 门禁）",
+      "status": "done",
+      "verification": [
+        "8 个 Agent 各有独立角色描述和专长领域",
+        "每个 Agent 有不同约束和门禁",
+        "前端 Agent 跑 npm lint，后端跑 mvn compile",
+        "标题关键词自动路由到最匹配 Agent"
+      ],
+      "evidence": [
+        "AGENT_ROLES 8 条目 ✅",
+        "agent_constraints() 差异化 ✅",
+        "agent_work_dir() 差异化 ✅",
+        "run_quality_gates() 差异化 ✅",
+        "route_bug() 关键词路由 ✅",
+        "cargo check ✅, cargo test 33/33 ✅"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "afrs-005",
+      "priority": 5,
+      "area": "harness",
+      "title": "修复后自动化（push + resolve + 备注）",
+      "status": "done",
+      "verification": [
+        "auto_commit_fix() 执行 git add + commit + push",
+        "resolve_bug_in_zentao() 提取 stdout 中的根因和修复方案",
+        "build_zentao_comment() 生成结构化备注",
+        "备注格式：fix(#N): title\n\n根因：\n- ...\n\n修复：\n- ..."
+      ],
+      "evidence": [
+        "subagent.rs: auto_commit_fix(git push) ✅",
+        "subagent.rs: extract_fix_details() ✅",
+        "subagent.rs: build_zentao_comment() ✅",
+        "subagent.rs: resolve_bug_in_zentao() ✅",
+        "cargo check ✅, cargo test 33/33 ✅"
+      ],
+      "notes": "全自动化：修完 → 质量门禁 → 提交推送 → 禅道解决加备注"
     }
   ]
 }

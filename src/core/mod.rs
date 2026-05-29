@@ -9,3 +9,5 @@ pub mod quota_monitor;
 pub mod subagent;
 pub mod tool_executor;
 pub mod trace;
+pub mod sql_validator;
+pub mod zentao;

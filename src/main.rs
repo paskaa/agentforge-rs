@@ -65,6 +65,11 @@ enum Cli {
     },
     /// List all agents and their expertise
     ListAgents,
+    /// Validate all Mapper XML SQL syntax (baseline scan)
+    ValidateAllSql {
+        #[arg(long, default_value = "/root/.openclaw/workspace/his-repo")]
+        repo: String,
+    },
 }
 
 #[tokio::main]
@@ -120,6 +125,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Cli::ListAgents => {
             agentforge::core::coordinator::list_agents_cli();
+        }
+        Cli::ValidateAllSql { repo } => {
+            use agentforge::core::sql_validator;
+            let pg = sql_validator::PgConfig::default();
+            tracing::info!("开始全量 SQL 基线扫描: {}", repo);
+            let results = sql_validator::validate_all_mappers(&repo, &pg);
+            let report = sql_validator::generate_scan_report(&results);
+            println!("{}", report);
         }
     }
 

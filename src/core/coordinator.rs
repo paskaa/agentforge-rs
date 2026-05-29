@@ -87,28 +87,46 @@ pub fn route_bug(title: &str) -> &str {
 
 const ZENTAO_DIR: &str = "/root/.openclaw/extensions/zentao-token-refresh";
 
-/// Scan all agent bugs and print summary to stdout.
+/// Scan all agent bugs and print summary to stdout (using Rust API client).
 pub async fn scan_bugs_cli() -> anyhow::Result<()> {
     let agents = ["zhugeliang", "liubei", "guanyu", "zhaoyun", "xunyu", "zhangfei", "huatuo", "chenlin"];
     
-    // Refresh token
-    let _ = Command::new("bash")
-        .arg(format!("{}/zentao-token-refresh.sh", ZENTAO_DIR))
-        .arg("zhangfei")
-        .output();
+    // Map agent names to Zentao accounts
+    let agent_accounts = [
+        ("zhugeliang", "wangyizhe"),
+        ("liubei", "liubei"),
+        ("guanyu", "guanyu"),
+        ("zhaoyun", "zhaoyun"),
+        ("xunyu", "xunyu"),
+        ("zhangfei", "zhangfei"),
+        ("huatuo", "huatuo"),
+        ("chenlin", "chenlin"),
+    ];
+    
+    let cfg = crate::config::Config::load()?;
+    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
     
     let mut found = false;
-    for agent in &agents {
-        let Ok(out) = Command::new("bash")
-            .arg(format!("{}/zentao-my-bugs.sh", ZENTAO_DIR))
-            .arg(agent)
-            .arg("active")
-            .output()
-        else { continue; };
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if !stdout.contains("没有未解决的 Bug") && !stdout.trim().is_empty() {
-            println!("【{}】\n{}", agent, stdout.trim());
-            found = true;
+    for (agent, account) in &agent_accounts {
+        match client.get_my_bugs(account).await {
+            Ok(bugs) if !bugs.is_empty() => {
+                println!("【{}】", agent);
+                for b in &bugs {
+                    let sev = match b.severity.unwrap_or(3) {
+                        1 => "致命",
+                        2 => "严重",
+                        3 => "一般",
+                        4 => "轻微",
+                        _ => "未知",
+                    };
+                    println!("  #{} [{}] {} — {}", b.id, sev, b.title, b.moduleTitle.as_deref().unwrap_or(""));
+                }
+                found = true;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to fetch bugs for {}: {}", agent, e);
+            }
         }
     }
     if !found {
@@ -154,7 +172,14 @@ pub async fn submit_fix_cli(bug_id: &str, bug_title: &str, fixer: &str) -> anyho
     });
     
     let queue = format!("agent-work-queue:fix:{}", fixer);
-    let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
+    // 去重：检查该 bug 是否已在队列中
+    let existing: Vec<String> = conn.lrange(&queue, 0, -1).await.unwrap_or_default();
+    let already_queued = existing.iter().any(|s| s.contains(&format!("Bug #{}", bug_id)));
+    if already_queued {
+        println!("⏭️   Bug #{} 已在 {} 队列中，跳过重复分派", bug_id, fixer);
+    } else {
+        let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
+    }
     
     println!("已提交 Bug #{} 的修复任务给 {}。修复由 Claude Code 异步执行。", bug_id, fixer);
     Ok(())
@@ -184,7 +209,14 @@ pub async fn assign_bug_cli(bug_id: &str, fixer: &str) -> anyhow::Result<()> {
     });
     
     let queue = format!("agent-work-queue:fix:{}", fixer);
-    let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
+    // 去重：检查该 bug 是否已在队列中
+    let existing: Vec<String> = conn.lrange(&queue, 0, -1).await.unwrap_or_default();
+    let already_queued = existing.iter().any(|s| s.contains(&format!("Bug #{}", bug_id)));
+    if already_queued {
+        println!("⏭️   Bug #{} 已在 {} 队列中，跳过重复分派", bug_id, fixer);
+    } else {
+        let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
+    }
     
     let names = [("zhaoyun", "赵云（前端）"), ("guanyu", "关羽（后端）"), ("xunyu", "荀彧（数据库）")];
     let display = names.iter().find(|(id,_)| *id == fixer).map(|(_,n)| *n).unwrap_or(fixer);
@@ -262,15 +294,19 @@ pub struct PipelineFixResult {
 
 /// Run the full pipeline: scan all active bugs → fix each one sequentially.
 pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Result<()> {
-    let agents = ["zhaoyun", "guanyu", "xunyu"];
-    
-    // Step 1: Refresh Zentao token
+    // Step 1: Connect to Redis
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let client = redis::Client::open(redis_url)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+
+    // Step 2: Refresh Zentao token
     let _ = std::process::Command::new("bash")
         .arg(format!("{}/zentao-token-refresh.sh", ZENTAO_DIR))
         .arg("zhangfei")
         .output();
-    
-    // Step 2: Scan all agents for bugs
+
+    // Step 3: Scan all agents for bugs
+    let agents = ["zhaoyun", "guanyu", "xunyu"];
     let mut all_bugs: Vec<(String, String, String)> = Vec::new();
     for agent in &agents {
         let Ok(out) = std::process::Command::new("bash")
@@ -289,54 +325,93 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
             }
         }
     }
-    
+
     if all_bugs.is_empty() {
         println!("🔍 当前没有活跃的 Bug。");
         return Ok(());
     }
-    
+
     let total = all_bugs.len().min(max_bugs);
     println!("🔍 扫描完成：共 {} 个活跃 Bug（本次处理 {} 个）", all_bugs.len(), total);
-    println!("{}
-", "=".repeat(60));
-    
-    // Step 3: Fix each bug sequentially
+    println!("{}", "=".repeat(60));
+
+    // Step 4: Fix each bug sequentially via Redis
     let mut results: Vec<PipelineFixResult> = Vec::new();
     for (i, (bug_id, bug_title, fixer)) in all_bugs.iter().take(max_bugs).enumerate() {
-        println!("[{}/{}] 🛠️  处理 Bug #{} — {}", i + 1, total, bug_id, bug_title);
-        println!("    修复者: {}", fixer);
+        println!("[{}/{}] 🛠️  修复 Bug #{}: {}", i + 1, total, bug_id, bug_title);
+        println!("    队列: agent-work-queue:fix:{}", fixer);
         println!("{}", "-".repeat(40));
-        
+
         let start = std::time::Instant::now();
-        let result = crate::core::subagent::run_claude_fix_sync(
-            fixer,
-            bug_id,
-            bug_title,
-            "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh",
-            10800,
-        );
-        
+
+        // 提交到 Redis 队列（与 Executor 消费的同一个队列）
+        let task = serde_json::json!({
+            "agent_id": fixer,
+            "message": format!("请修复 Bug #{}：{}", bug_id, bug_title),
+            "source": "pipeline",
+            "sender_id": "pipeline",
+            "chat_id": "",
+            "is_dm": "true",
+            "msg_id": format!("pipeline-fix-{}-{}", bug_id, chrono::Utc::now().timestamp()),
+            "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        });
+
+        let queue = format!("agent-work-queue:fix:{}", fixer);
+        // 去重：检查该 bug 是否已在队列中
+        let existing: Vec<String> = conn.lrange(&queue, 0, -1).await.unwrap_or_default();
+        let already_queued = existing.iter().any(|s| s.contains(&format!("Bug #{}", bug_id)));
+        if already_queued {
+            println!("⏭️   Bug #{} 已在队列中，跳过重复分派", bug_id);
+        } else {
+            let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
+        }
+
+        // 轮询等待修复结果（最大等待 30 分钟）
+        let result_key = format!("pipeline:result:{}", bug_id);
+        let mut success = false;
+        let mut elapsed_ms = 0u64;
+        let mut error_msg = String::new();
+        let mut changes = 0u32;
+
+        for _ in 0..180 {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let val: Option<String> = conn.get(&result_key).await.unwrap_or(None);
+            if let Some(val) = val {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
+                    success = parsed.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                    elapsed_ms = parsed.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                    changes = parsed.get("changes").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    error_msg = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                }
+                // 删除结果 key，释放空间
+                let _: redis::RedisResult<()> = conn.del(&result_key).await;
+                break;
+            }
+        }
+
         let elapsed = start.elapsed().as_secs();
-        let result_entry = PipelineFixResult {
-            bug_id: bug_id.clone(),
-            bug_title: bug_title.clone(),
-            fixer: fixer.clone(),
-            success: result.success,
-            elapsed_ms: result.elapsed_ms,
-            error: if result.success { None } else { Some(result.stderr.chars().take(200).collect()) },
-        };
-        results.push(result_entry);
-        
-        if result.success {
-            println!("✅ Bug #{} 修复完成（{} 秒，{} 个文件变更）", bug_id, elapsed, result.changes);
+        if success {
+            println!("✅ Bug #{} 修复完成（{} 秒，{} 个文件变更）", bug_id, elapsed, changes);
+        } else if error_msg.is_empty() {
+            println!("⏰ Bug #{} 超时（{} 秒，超过 30 分钟限制）", bug_id, elapsed);
+            error_msg = "Pipeline 轮询超时（30 分钟）".to_string();
         } else {
             println!("❌ Bug #{} 修复失败（{} 秒）", bug_id, elapsed);
         }
-        println!("{}
-", "=".repeat(60));
+
+        results.push(PipelineFixResult {
+            bug_id: bug_id.clone(),
+            bug_title: bug_title.clone(),
+            fixer: fixer.clone(),
+            success,
+            elapsed_ms,
+            error: if success { None } else { Some(error_msg) },
+        });
+
+        println!("{}", "=".repeat(60));
     }
-    
-    // Step 4: Summary
+
+    // Step 5: Summary
     let success_count = results.iter().filter(|r| r.success).count();
     let fail_count = results.iter().filter(|r| !r.success).count();
     println!("📊 执行汇总");
@@ -360,6 +435,7 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
     }
     Ok(())
 }
+
 
 #[cfg(test)]
 #[cfg(test)]
