@@ -1,7 +1,7 @@
-//! Sub-agent pool — manages Claude Code / Codex fix invocations.
+//! Sub-agent pool — manages Codex fix invocations.
 //!
 //! Each agent gets its own Git worktree for isolated fixes.
-//! When Codex is invoked, the prompt includes the full Harness Engineering
+//! When invoked, the prompt includes the full Harness Engineering
 //! methodology (Init → Plan → Implement → Verify → Cleanup) via loaded skills.
 //!
 //! All fix invocations go through `codex-aliyun` → `mimo2codex` → `codex` pipeline.
@@ -12,29 +12,43 @@ use std::time::Instant;
 /// Agent role descriptions and expertise for prompt customization.
 const AGENT_ROLES: &[(&str, &str, &str, &str)] = &[
     ("zhugeliang", "架构师/协调者",
-     "负责分析 Bug、拆解任务、分派给合适的修复 Agent。关注系统整体架构和全链路数据流。",
-     "系统架构|全链路分析|任务拆解|代码审查"),
+     "负责分析 Bug、拆解任务、分派给合适的修复 Agent。关注系统整体架构和全链路数据流。
+在修复流程中：Zhaoyun(前端) → Guanyu(后端) → Xunyu(DB) → Zhangfei(测试) → Huatuo(验收) → Chenlin(归档)",
+     "系统架构|全链路分析|任务拆解|代码审查|流程协调|Agent调度"),
     ("guanyu", "后端修复工程师",
-     "负责 Java/Spring 后端修复。精通 MyBatis-Plus、Spring Boot、REST API、Maven。",
-     "Java|Spring|MyBatis|Maven|REST API|Controller|Service|Mapper"),
+     "负责 Java/Spring 后端修复。精通 MyBatis-Plus、Spring Boot、REST API、Maven。
+修完后自动触发 Zhangfei 测试 → Huatuo 验收 → Chenlin 归档。
+关键检查点：Controller参数接收 → Service逻辑处理 → Mapper SQL映射 → DB字段匹配",
+     "Java|Spring|MyBatis|Maven|REST API|Controller|Service|Mapper|SQL|后端"),
     ("zhaoyun", "前端修复工程师",
-     "负责 Vue3 前端修复。精通 ElementUI、TypeScript、Axios、Vite。",
-     "Vue|ElementUI|TypeScript|前端|界面|CSS|组件|Axios"),
+     "负责 Vue3 前端修复。精通 ElementUI、TypeScript、Axios、Vite。
+修完后自动触发 Zhangfei 测试 → Huatuo 验收 → Chenlin 归档。
+关键检查点：页面组件 → API调用 → 数据绑定 → 展示字段",
+     "Vue|ElementUI|TypeScript|前端|界面|CSS|组件|Axios|Vite"),
     ("xunyu", "数据库工程师",
-     "负责 SQL/数据库修复。精通 PostgreSQL、DDL、DML、索引优化、查询分析。",
-     "SQL|PostgreSQL|索引|DDL|DML|数据库|慢查询|表结构"),
+     "负责 SQL/数据库修复。精通 PostgreSQL、DDL、DML、索引优化、查询分析。
+关注：表结构设计 → 查询性能 → 数据一致性 → 迁移脚本规范",
+     "SQL|PostgreSQL|索引|DDL|DML|数据库|慢查询|表结构|迁移|数据一致性"),
     ("zhangfei", "QA 测试工程师",
-     "负责编写和运行测试。精通 Playwright、pytest、端到端测试、边界用例。",
-     "测试|Playwright|pytest|端到端测试|自动化测试|E2E"),
+     "负责运行回归测试（Playwright）来验证修复质量。
+测试通过 → 通知 Huatuo 验收 + Chenlin 归档。
+测试失败 → 自动退回修复 Agent 重修（最多 3 次）。
+如果没有对应 Playwright 测试，标记为「无需测试」继续流转。",
+     "测试|Playwright|pytest|端到端测试|自动化测试|E2E|回归测试|质量门禁"),
     ("huatuo", "产品验收员",
-     "负责验证修复是否满足业务需求。关注用户场景和验收标准。",
-     "验收|业务验证|用户场景|功能确认"),
+     "负责验证修复是否满足业务需求。关注用户场景和验收标准。
+验收通过 → 通知相关方。
+验收逻辑：检查测试文档 → 确认修复符合 Bug 描述 → 飞书通知结果。",
+     "验收|业务验证|用户场景|功能确认|需求符合度|质量验收"),
     ("chenlin", "文档工程师",
-     "负责编写和维护项目文档。精通 Markdown、API 文档、技术写作。",
-     "文档|Markdown|API文档|技术写作|README"),
+     "负责生成和归档 Bug 修复文档。
+归档内容：Bug 编号 → 修复时间 → 修复摘要 → 测试结果 → 验收状态。
+文档保存至 Redis（30 天 TTL），可供后续查询。",
+     "文档|Markdown|API文档|技术写作|归档|知识管理"),
     ("liubei", "项目经理",
-     "负责跟踪进度、协调资源、管理需求优先级。",
-     "项目管理|进度跟踪|需求管理|资源协调"),
+     "负责跟踪进度、协调资源、管理需求优先级。
+监控整体 Pipeline 健康度：修复成功率 → 测试通过率 → 验收完成率。",
+     "项目管理|进度跟踪|需求管理|资源协调|Pipeline监控|质量看板"),
 ];
 
 /// Get the work directory for a given agent.
@@ -78,14 +92,40 @@ fn agent_constraints(agent_name: &str) -> &str {
              - 复杂查询用 CTE 或子查询，避免嵌套过深
              - 涉及索引变更先评估现有查询计划"
         }
+        "zhangfei" => {
+            "## 测试约束
+             - 运行 Playwright 回归测试：npx playwright test --grep @bug{id} --workers=1
+             - 如果测试不存在：标记为「无需测试」继续流转
+             - 测试失败：自动退回修复 Agent 重修（最多 3 次）
+             - 测试通过：通知 Huatuo 验收 + Chenlin 归档"
+        }
+        "huatuo" => {
+            "## 验收约束
+             - 核心检查：修复是否满足 Bug 描述的全部要求
+             - 检查测试文档是否存在
+             - 验收通过 → 飞书通知相关方
+             - 验收失败 → 记录失败原因返回修复 Agent"
+        }
+        "chenlin" => {
+            "## 归档约束
+             - 生成修复文档：包含 Bug 编号、修复时间、变更摘要
+             - 文档保存至 Redis（30 天 TTL）
+             - 飞书通知归档完成"
+        }
+        "liubei" => {
+            "## 管理约束
+             - 监控 Pipeline 整体健康度
+             - 跟踪：修复成功率、测试通过率、验收完成率
+             - 定期汇总报告"
+        }
         _ => "## 通用约束
 - 修改后运行对应编译检查"
     }
 }
 
-/// Result of invoking Claude Code / Codex for a bug fix.
+/// Result of invoking Codex for a bug fix.
 #[derive(Debug, Clone)]
-pub struct ClaudeResult {
+pub struct CodexResult {
     pub success: bool,
     pub bug_id: String,
     pub elapsed_ms: u64,
@@ -163,6 +203,10 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - 禁止硬编码密钥/密码
 - 涉及 Mapper XML 时，UNION ALL 所有子查询统一修改
 - 涉及数据库字段时，走通全链路：前端→API→Service→Mapper→DB
+- 涉及交互/状态变更的 BUG：必须同时分析「发起方📤」和「接收方📥」两端
+  - 发起方：操作触发端（如护士退回）— 录入/提交是否正常？
+  - 接收方：信息展示端（如医生查看）— 查询/展示是否正常？
+  - 两端都要跑一次 6 环分析，分别标记状态
 
 ## 已加载的技能（融入你的工作方式）
 
@@ -216,11 +260,17 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 6. **Fix**: 修改文件（用 apply_patch），一次修彻底
    - ⚠️ 涉及新增 Entity 字段时，必须同时创建 DB 迁移脚本（sql/迁移记录-DB变更记录/YYYYMMDD_fix_BUG#XXXX_description.sql）
    - ⚠️ 只改 Entity 不改 DB = 修复不完整，运行时 100% 报错
+   - ⚠️ 涉及交互流程（退回/审核/签发等）的 BUG，必须识别「发起方📤」（谁操作）和「接收方📥」（谁查看）
+     - 📤 发起方：检查操作入口→校验→API→Service→DB 是否完整
+     - 📥 接收方：检查 DB→Service→API→展示字段→页面列 是否完整
+     - 只修一端不修另一端 = 修复不完整
 7. **Verify**: 运行编译/语法检查 + 端到端数据流确认
    - 编译检查：mvn compile / npm lint / cargo check / vue-tsc + vite build
    - ⚠️ 数据流检查：从起点到终点每环确认数据能传过去
-     - 前端是否发送了字段？→ API 参数是否接收？→ Service 是否读取？→ DB 是否写入？
+     - 📤 录入链路：前端发送字段 → API 参数接收 → Service 读取 → DB 写入
+     - 📥 展示链路：DB 查询 → Service 返回 → API 响应 → 前端展示列
    - ⚠️ 交互检查：涉及前端改动时确认弹窗/提示/跳转是否正常工作
+   - ⚠️ 两端核对：涉及交互流程的 BUG，用表格对比两端修复状态
 8. **Submit**: 输出变更摘要，格式：
    ```
    根因：
@@ -616,7 +666,7 @@ fn run_codex_fix_impl(
     bug_id: &str,
     bug_title: &str,
     _timeout_secs: u64,
-) -> ClaudeResult {
+) -> CodexResult {
     let start = Instant::now();
 
     // Step 1: Query bug details from Zentao (Rust API client)
@@ -685,7 +735,7 @@ fn run_codex_fix_impl(
                 .stderr(std::process::Stdio::piped())
                 .spawn() {
                 Ok(c) => c,
-                Err(e2) => return ClaudeResult {
+                Err(e2) => return CodexResult {
                     success: false, bug_id: bug_id.to_string(),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     stdout: String::new(),
@@ -774,7 +824,7 @@ fn run_codex_fix_impl(
                     agent_name, bug_id);
             }
 
-            ClaudeResult {
+            CodexResult {
                 success,
                 bug_id: bug_id.to_string(),
                 elapsed_ms: elapsed,
@@ -784,7 +834,7 @@ fn run_codex_fix_impl(
                 changes,
             }
         }
-        Err(e) => ClaudeResult {
+        Err(e) => CodexResult {
             success: false,
             bug_id: bug_id.to_string(),
             elapsed_ms: elapsed,
@@ -1132,27 +1182,27 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
 /// Synchronous fix entry point — safe for `tokio::task::block_in_place`.
 /// This is the main entry point called by the agent executor.
 /// Always routes through `mimo2codex → codex` with full Harness methodology.
-pub fn run_claude_fix_sync(
+pub fn run_codex_fix(
     agent_name: &str,
     bug_id: &str,
     bug_title: &str,
-    _claude_fix_script: &str,
+    _fix_script: &str,
     timeout_secs: u64,
-) -> ClaudeResult {
+) -> CodexResult {
     tracing::info!("[{}] Harness fix for Bug #{}: {}",
         agent_name, bug_id, bug_title);
     run_codex_fix_impl(agent_name, bug_id, bug_title, timeout_secs)
 }
 
 /// Async wrapper (uses sync internally).
-pub async fn run_claude_fix(
+pub async fn run_codex_fix_async(
     agent_name: &str,
     bug_id: &str,
     bug_title: &str,
-    claude_fix_script: &str,
+    fix_script: &str,
     timeout_secs: u64,
-) -> ClaudeResult {
-    run_claude_fix_sync(agent_name, bug_id, bug_title, claude_fix_script, timeout_secs)
+) -> CodexResult {
+    run_codex_fix(agent_name, bug_id, bug_title, fix_script, timeout_secs)
 }
 
 // ──────────────────────────────────────────────

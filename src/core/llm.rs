@@ -1,4 +1,4 @@
-//! LLM client — async HTTP calls to Bailian/DeepSeek API with retry.
+//! LLM client — async HTTP calls to Bailian/Xiaomi API with retry.
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

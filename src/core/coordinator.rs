@@ -135,28 +135,45 @@ pub async fn scan_bugs_cli() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Query a single bug and print detail to stdout.
+/// Query a single bug and print detail to stdout — 使用 Rust API 客户端
 pub async fn query_bug_cli(bug_id: &str) -> anyhow::Result<()> {
-    let Ok(out) = Command::new("bash")
-        .arg(format!("{}/zentao-bug-query.sh", ZENTAO_DIR))
-        .arg(bug_id)
-        .output()
-    else {
-        println!("查询 Bug #{} 失败", bug_id);
-        return Ok(());
+    let cfg = match crate::config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("加载配置失败: {}", e);
+            return Ok(());
+        }
     };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if stdout.trim().is_empty() {
-        println!("Bug #{} 查询结果为空。", bug_id);
-    } else {
-        println!("{}", stdout.trim());
+    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+    match client.get_bug(bug_id).await {
+        Ok(detail) => {
+            println!("{}", detail.format_for_prompt());
+        }
+        Err(e) => {
+            tracing::warn!("Zentao API 查询失败: {}, 尝试 shell 脚本回退", e);
+            let Ok(out) = Command::new("bash")
+                .arg(format!("{}/zentao-bug-query.sh", ZENTAO_DIR))
+                .arg(bug_id)
+                .output()
+            else {
+                println!("查询 Bug #{} 失败（API 和 shell 均不可用）", bug_id);
+                return Ok(());
+            };
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.trim().is_empty() {
+                println!("Bug #{} 查询结果为空。", bug_id);
+            } else {
+                println!("{}", stdout.trim());
+            }
+        }
     }
     Ok(())
 }
 
 /// Submit a fix task to the Redis queue and print ack to stdout.
 pub async fn submit_fix_cli(bug_id: &str, bug_title: &str, fixer: &str) -> anyhow::Result<()> {
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let cfg = crate::config::Config::load()?;
+    let redis_url = cfg.redis_url();
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_multiplexed_async_connection().await?;
     
@@ -181,7 +198,7 @@ pub async fn submit_fix_cli(bug_id: &str, bug_title: &str, fixer: &str) -> anyho
         let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
     }
     
-    println!("已提交 Bug #{} 的修复任务给 {}。修复由 Claude Code 异步执行。", bug_id, fixer);
+    println!("已提交 Bug #{} 的修复任务给 {}。修复由 Codex 异步执行。", bug_id, fixer);
     Ok(())
 }
 
@@ -193,7 +210,8 @@ pub async fn assign_bug_cli(bug_id: &str, fixer: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let cfg = crate::config::Config::load()?;
+    let redis_url = cfg.redis_url();
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_multiplexed_async_connection().await?;
     
@@ -295,7 +313,8 @@ pub struct PipelineFixResult {
 /// Run the full pipeline: scan all active bugs → fix each one sequentially.
 pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Result<()> {
     // Step 1: Connect to Redis
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let cfg = crate::config::Config::load()?;
+    let redis_url = cfg.redis_url();
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
@@ -305,24 +324,27 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
         .arg("zhangfei")
         .output();
 
-    // Step 3: Scan all agents for bugs
-    let agents = ["zhaoyun", "guanyu", "xunyu"];
+    // Step 3: Scan all active bugs via Zentao API (handles ALL pages, not just first 50)
+    let zentao_client = crate::core::zentao::ZentaoClient::from_config(&cfg);
     let mut all_bugs: Vec<(String, String, String)> = Vec::new();
-    for agent in &agents {
-        let Ok(out) = std::process::Command::new("bash")
-            .arg(format!("{}/zentao-my-bugs.sh", ZENTAO_DIR))
-            .arg(agent)
-            .arg("active")
-            .output()
-        else { continue; };
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout.contains("没有未解决的 Bug") || stdout.trim().is_empty() {
-            continue;
-        }
-        for line in stdout.lines() {
-            if let Some((bug_id, title)) = parse_bug_line_full(line) {
-                all_bugs.push((bug_id, title, agent.to_string()));
+    match zentao_client.get_all_active_bugs().await {
+        Ok(bugs) => {
+            for b in bugs {
+                if b.id == 613 { continue; } // skip already fixed
+                // Categorize by area based on title/module
+                let combined = format!("{:?} {:?}", b.title, b.moduleTitle).to_lowercase();
+                let fixer = if combined.contains("报错") || combined.contains("保存") || combined.contains("接口") || combined.contains("sql") || combined.contains("数据") {
+                    "guanyu"
+                } else {
+                    "zhaoyun" // frontend handles most UI/display bugs
+                };
+                all_bugs.push((b.id.to_string(), b.title, fixer.to_string()));
             }
+        }
+        Err(e) => {
+            tracing::error!("Failed to scan bugs via Zentao API: {}", e);
+            println!("❌ 无法扫描 Bug：{}", e);
+            return Ok(());
         }
     }
 
@@ -372,8 +394,14 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
         let mut elapsed_ms = 0u64;
         let mut error_msg = String::new();
         let mut changes = 0u32;
+        let mut polls = 0u32;
 
-        for _ in 0..180 {
+        loop {
+            polls += 1;
+            if polls > 720 {  // 720 * 10s = 2小时安全上限
+                tracing::warn!("Bug #{} 轮询超时（{} 小时），跳过", bug_id, polls * 10 / 3600);
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             let val: Option<String> = conn.get(&result_key).await.unwrap_or(None);
             if let Some(val) = val {
@@ -393,8 +421,8 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
         if success {
             println!("✅ Bug #{} 修复完成（{} 秒，{} 个文件变更）", bug_id, elapsed, changes);
         } else if error_msg.is_empty() {
-            println!("⏰ Bug #{} 超时（{} 秒，超过 30 分钟限制）", bug_id, elapsed);
-            error_msg = "Pipeline 轮询超时（30 分钟）".to_string();
+            println!("⏰ Bug #{} 超时（{} 秒，超过 2 小时限制）", bug_id, elapsed);
+            error_msg = "Pipeline 轮询超时（2 小时）".to_string();
         } else {
             println!("❌ Bug #{} 修复失败（{} 秒）", bug_id, elapsed);
         }

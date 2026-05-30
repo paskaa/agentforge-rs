@@ -279,6 +279,11 @@ cargo run -- pipeline --max-bugs 5
 8. **用户数据不做 shell 拼接** — 用 `Command::new("bash").arg(script).args(args)`
 9. **ACK 用 Redis stream ID（`_redis_id`）** — 不是飞书消息 ID
 10. **AGENTS.md 是地图** — 详细规则放 .harness/ 按需加载
+11. **交互型 BUG 必查两端** — 涉及退回/审核/签发等操作流程的 BUG：
+    - 📤 发起方检查：入口→校验→API→Service→DB
+    - 📥 接收方检查：DB→Service→API→展示字段→页面列
+    - 两端各跑一次 6 环，用表格对比修复状态
+12. **Entity 字段变更必配迁移脚本** — 新增 Entity 字段必须同时创建 
 
 ---
 

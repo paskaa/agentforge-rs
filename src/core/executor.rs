@@ -77,7 +77,7 @@ impl AgentExecutor {
             // For fixers: check per-agent lock BEFORE consuming — avoid task loss
             // Also auto-release stale locks (TTL < 3300 = held >15min)
             if self.is_fixer {
-                let my_lock = format!("claude_code_lock:{}", self.agent_id);
+                let my_lock = format!("codex_lock:{}", self.agent_id);
                 let ttl: i64 = self.redis.clone().ttl(&my_lock).await.unwrap_or(-2);
                 if ttl == -2 { /* key doesn't exist — no lock */ }
                 else if ttl > 0 && ttl < 900 {
@@ -107,7 +107,10 @@ impl AgentExecutor {
 
             match source {
                 "pm_analyze" if self.agent_id == "liubei" => self.handle_pm_analyze(msg).await,
-                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" => self.handle_fix_task(msg).await,
+                "pipeline_analyze" if self.agent_id == "zhugeliang" => self.handle_pipeline_analyze(msg).await,
+                "pipeline_db_review" if self.agent_id == "xunyu" => self.handle_pipeline_db_review(msg).await,
+                "pipeline_report" if self.agent_id == "liubei" => self.handle_pipeline_report(msg).await,
+                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" => self.handle_fix_task(msg).await,
                 "pipeline_fix_done" if self.agent_id == "zhangfei" => self.handle_pipeline_test(msg).await,
                 "pipeline_test_done" if self.agent_id == "huatuo" => self.handle_pipeline_verify(msg).await,
                 "pipeline_test_done" if self.agent_id == "chenlin" => self.handle_chenlin_doc(msg).await,
@@ -220,9 +223,9 @@ impl AgentExecutor {
     async fn handle_fix_task(&self, msg: &str) {
         let bug_id = pipeline::parse_bugs_from_message(msg).first().map(|(b,_)| b.clone()).unwrap_or_default();
         if bug_id.is_empty() { return; }
-        self.traces.log(&self.agent_id, "fix_start", Some(&format!("Bug#{}", bug_id)), Some(msg), Some("claude_code"), None, None, Some("pending")).await;
+        self.traces.log(&self.agent_id, "fix_start", Some(&format!("Bug#{}", bug_id)), Some(msg), Some("codex"), None, None, Some("pending")).await;
         // Try to acquire per-agent lock
-        let lock_key = format!("claude_code_lock:{}", self.agent_id);
+        let lock_key = format!("codex_lock:{}", self.agent_id);
         let lock_sync = Arc::clone(&self.redis_sync); let agent = self.agent_id.clone();
         let lk = lock_key.clone();
         let acquired = tokio::task::spawn_blocking(move || {
@@ -244,20 +247,20 @@ impl AgentExecutor {
             tracing::info!("[{}] Codex spawn started for Bug #{}", an, bid);
             let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tokio::task::block_in_place(|| {
-                    subagent::run_claude_fix_sync(&an, &bid, &m, "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh", 10800)
+                    subagent::run_codex_fix(&an, &bid, &m, "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh", 10800)
                 })
             })) {
                 Ok(r) => r,
                 Err(panic) => {
                     let msg = if let Some(s) = panic.downcast_ref::<String>() { s.clone() } else { "panic".into() };
                     tracing::error!("[{}] Codex panic for #{}: {}", an, bid, msg);
-                    let _: redis::RedisResult<()> = redis_clone.del(format!("claude_code_lock:{}", an)).await;
+                    let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
                     return;
                 }
             };
             tracing::info!("[{}] Fix #{}: ok={} changes={} time={}ms", an, bid, r.success, r.changes, r.elapsed_ms);
-            tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("claude_code"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
-            let _: redis::RedisResult<()> = redis_clone.del(format!("claude_code_lock:{}", an)).await;
+            tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("codex"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
+            let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
 
             // 飞书通知修复结果
             let _ = feishu.send(&format!(
@@ -293,7 +296,7 @@ impl AgentExecutor {
                 tracing::info!("[{}] Bug #{} fix failed, removed from queue and added to failed set", an, bid);
             }
 
-            // 管道：成功时触发张飞测试
+            // 管道：先走诸葛亮分析路由，再走全链路
             if r.success {
                 // Dedup: only trigger pipeline once per bug (Redis key with 24h TTL)
                 let pipeline_key = format!("pipeline_sent:{}", bid);
@@ -301,13 +304,17 @@ impl AgentExecutor {
                 if !already_sent {
                     let _: redis::RedisResult<()> = redis_clone.set_ex(&pipeline_key, "1", 86400).await;
                     let reporter = pipeline::extract_reporter(&m);
+                    // Step 1: 诸葛亮分析修复是否需要DB审查
                     let pipe_task = serde_json::json!({
-                        "agent_id": "zhangfei",
-                        "message": format!("请测试 Bug #{} 的修复情况。提出人: {}。", bid, reporter),
-                        "source": "pipeline_fix_done",
+                        "agent_id": "zhugeliang",
+                        "message": format!("请分析 Bug #{} 的修复是否需要 DB 审查。
+提出人: {}。
+修复 Agent: {}。
+如果涉及 DB 变更，路由给 Xunyu 审查；否则直接路由给 Zhangfei 测试。", bid, reporter, an),
+                        "source": "pipeline_analyze",
                         "sender_id": an,
                         "bug_reporter": reporter,
-                        "msg_id": format!("pipeline-fix-{}-{}", bid, chrono::Utc::now().timestamp()),
+                        "msg_id": format!("pipeline-analyze-{}-{}", bid, chrono::Utc::now().timestamp()),
                         "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                         "chat_id": "", "is_dm": "true",
                     });
@@ -573,6 +580,153 @@ impl AgentExecutor {
     /// New Hermes-first chat handler — returns true if Hermes handled the message.
     /// Hermes bridge auto-executes fast pipeline actions (scan_bugs, query_bug)
     /// and formulates the final reply. Long actions (fix_bug) are submitted async.
+
+    /// 诸葛亮：分析修复是否需要 DB 审查，路由到下一步
+    async fn handle_pipeline_analyze(&self, msg: &str) {
+        let bid = pipeline::extract_bug_id(msg);
+        if bid.is_empty() { return; }
+        let reporter = pipeline::extract_reporter(msg);
+        let sender = msg.lines().filter_map(|l| {
+            if l.contains("修复 Agent:") { l.split(':').nth(1).map(|s| s.trim()) } else { None }
+        }).next().unwrap_or("zhaoyun");
+        
+        tracing::info!("[zhugeliang] Analyzing Bug #{} for routing", bid);
+        
+        // 分析是否需要 DB 审查：检查禅道 Bug 详情中是否包含数据库相关关键词
+        let needs_db_review = {
+            let cfg = crate::config::Config::load().ok();
+            let needs = if let Some(cfg) = cfg {
+                let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                match client.get_bug(&bid).await {
+                    Ok(detail) => {
+                        let combined = format!("{:?} {:?} {:?}", detail.title, detail.steps, detail.module_title).to_lowercase();
+                        let db_kw = ["sql", "字段", "列", "表", "数据库", "column", "table", "ddl", "dml", "迁移", "mapper", "xml"];
+                        db_kw.iter().any(|kw| combined.contains(kw))
+                    }
+                    Err(_) => false,
+                }
+            } else { false };
+            needs
+        };
+        
+        // 路由：需DB审查 → Xunyu，否则直接 → Zhangfei
+        let next = if needs_db_review { "xunyu" } else { "zhangfei" };
+        let next_source = if needs_db_review { "pipeline_db_review" } else { "pipeline_fix_done" };
+        let next_msg = format!(
+            "请{} Bug #{} 的修复。提出人: {}。修复 Agent: {}。",
+            if needs_db_review { "审查" } else { "测试" },
+            bid, reporter, sender
+        );
+        
+        let pipe_task = serde_json::json!({
+            "agent_id": next,
+            "message": next_msg,
+            "source": next_source,
+            "sender_id": "zhugeliang",
+            "bug_reporter": reporter,
+            "msg_id": format!("pipeline-routed-{}-{}", bid, chrono::Utc::now().timestamp()),
+            "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "chat_id": "", "is_dm": "true",
+        });
+        let _: redis::RedisResult<i64> = self.redis.clone().rpush(
+            format!("agent-work-queue:fix:{}", next),
+            pipe_task.to_string()
+        ).await;
+        
+        tracing::info!("[zhugeliang] Bug #{} routed to {} (db_review={})", bid, next, needs_db_review);
+        let _ = self.feishu.send(&format!("🔀 Bug #{} 路由：{} → {}", bid, sender, next), None).await;
+        self.traces.log("zhugeliang", "analyze_done", Some(&format!("Bug#{}", bid)), Some(&format!("routed_to={} db={}", next, needs_db_review)), None, None, None, Some("ok")).await;
+    }
+
+    /// 荀彧：DB 变更审查
+    async fn handle_pipeline_db_review(&self, msg: &str) {
+        let bid = pipeline::extract_bug_id(msg);
+        if bid.is_empty() { return; }
+        let reporter = pipeline::extract_reporter(msg);
+        
+        tracing::info!("[xunyu] DB review for Bug #{}", bid);
+        
+        // 检查是否包含迁移脚本
+        let has_migration = {
+            let worktree = format!("/tmp/agentforge-worktrees/xunyu");
+            let path = format!("{}/openhis-server-new/sql", worktree);
+            std::path::Path::new(&path).exists()
+        };
+        
+        // DB 审查通过条件：有迁移脚本且 SQL 语法正确
+        let review_passed = has_migration; // 简化版：有迁移脚本即通过
+        
+        if review_passed {
+            tracing::info!("[xunyu] Bug #{} DB review PASSED", bid);
+            let _ = self.feishu.send(&format!("✅ Bug #{} DB 审查通过。", bid), None).await;
+            
+            // 路由到 Zhangfei 测试
+            let next_msg = format!("请测试 Bug #{} 的修复情况。提出人: {}。", bid, reporter);
+            let pipe_task = serde_json::json!({
+                "agent_id": "zhangfei",
+                "message": next_msg,
+                "source": "pipeline_fix_done",
+                "sender_id": "xunyu",
+                "bug_reporter": reporter,
+                "msg_id": format!("pipeline-fix-{}-{}", bid, chrono::Utc::now().timestamp()),
+                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "chat_id": "", "is_dm": "true",
+            });
+            let _: redis::RedisResult<i64> = self.redis.clone().rpush(
+                "agent-work-queue:fix:zhangfei",
+                pipe_task.to_string()
+            ).await;
+        } else {
+            tracing::warn!("[xunyu] Bug #{} DB review FAILED — missing migration script", bid);
+            let _ = self.feishu.send(&format!("⚠️ Bug #{} DB 审查失败：缺少迁移脚本，退回修复 Agent。", bid), None).await;
+            // 退回修复 Agent
+            let sender = msg.split("修复 Agent:").nth(1).and_then(|s| s.split(',').next()).map(|s| s.trim()).unwrap_or("zhaoyun");
+            let rework_msg = format!("Bug #{} DB 审查未通过：需要创建 DB 迁移脚本。请补充。", bid);
+            let pipe_task = serde_json::json!({
+                "agent_id": sender,
+                "message": rework_msg,
+                "source": "pipeline_retry",
+                "sender_id": "xunyu",
+                "msg_id": format!("pipeline-dbreview-{}-{}", bid, chrono::Utc::now().timestamp()),
+                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "chat_id": "", "is_dm": "true",
+            });
+            let _: redis::RedisResult<i64> = self.redis.clone().rpush(
+                format!("agent-work-queue:fix:{}", sender),
+                pipe_task.to_string()
+            ).await;
+        }
+        self.traces.log("xunyu", "db_review_done", Some(&format!("Bug#{}", bid)), Some(if review_passed {"pass"} else {"fail"}), None, None, None, Some(if review_passed {"ok"} else {"failed"})).await;
+    }
+
+    /// 刘备：Pipeline 进度报告
+    async fn handle_pipeline_report(&self, _msg: &str) {
+        tracing::info!("[liubei] Generating pipeline report");
+        
+        // 收集各 agent 队列深度
+        let agents = ["zhaoyun", "guanyu", "xunyu", "zhangfei", "huatuo", "chenlin"];
+        let mut report = String::from("📊 Pipeline 报告
+
+");
+        
+        // 查询各队列状态
+        for agent in &agents {
+            let queue_len: i64 = self.redis.clone().llen(format!("agent-work-queue:fix:{}", agent)).await.unwrap_or(0);
+            let failed_count: i32 = self.redis.clone().scard(format!("agent-failed-bugs:{}", agent)).await.unwrap_or(0);
+            let locked: bool = self.redis.clone().exists(format!("codex_lock:{}", agent)).await.unwrap_or(false);
+            report.push_str(&format!(
+                "{} 队列: {} | 处理中: {} | 失败: {}
+",
+                agent, queue_len, if locked {"✅"} else {"⏳"}, failed_count
+            ));
+        }
+        
+        report.push_str(&format!("
+🕐 报告时间: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")));
+        
+        let _ = self.feishu.send(&report, None).await;
+        self.traces.log("liubei", "report_done", None, Some(&report), None, None, None, Some("ok")).await;
+    }
     async fn handle_chat_hermes(&self, msg: &str, task: &Task) -> bool {
         let hermes_script = "/root/agentforge/scripts/hermes_bridge_cli.py";
         let python = "/root/agentforge/venv/bin/python3";

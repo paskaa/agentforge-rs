@@ -155,7 +155,7 @@ impl ZentaoClient {
 
     /// 获取指定用户的活跃 Bug 列表
     pub async fn get_my_bugs(&self, account: &str) -> anyhow::Result<Vec<BugSummary>> {
-        let url = format!("{}/api.php/v1/bugs?product=4&assignedTo={}&status=active&page=1&limit=100", 
+        let url = format!("{}/api.php/v1/bugs?product=4&assignedTo={}&page=1&limit=100", 
             self.base_url, account);
         let resp = self.client.get(&url)
             .header("Token", &self.token)
@@ -170,6 +170,40 @@ impl ZentaoClient {
         Ok(api_resp.bugs.unwrap_or_default())
     }
 
+
+    /// 获取产品下所有活跃 Bug（不限制指派给谁）
+    /// 处理分页：自动请求所有页面直到获取全部
+    pub async fn get_all_active_bugs(&self) -> anyhow::Result<Vec<BugSummary>> {
+        let mut all_bugs = Vec::new();
+        let mut page = 1;
+        let limit = 100;
+        loop {
+            let url = format!(
+                "{}/api.php/v1/products/4/bugs?page={}&limit={}",
+                self.base_url, page, limit
+            );
+            let resp = self.client.get(&url)
+                .header("Token", &self.token)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("Zentao API error: HTTP {}", resp.status());
+            }
+            let api_resp: BugListResponse = resp.json().await?;
+            let bugs = api_resp.bugs.unwrap_or_default();
+            let total = api_resp.total.unwrap_or(0);
+            // Zentao v1 API status=active filter is broken;
+            // fetch all and filter in Rust
+            all_bugs.extend(bugs);
+            if all_bugs.len() as i64 >= total as i64 {
+                break;
+            }
+            page += 1;
+        }
+        // Filter to only active bugs
+        all_bugs.retain(|b| b.status.as_deref() == Some("active"));
+        Ok(all_bugs)
+    }
     /// 获取 Agent 对应的禅道账号
     fn agent_account(agent_name: &str) -> &str {
         match agent_name {
