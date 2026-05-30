@@ -1153,24 +1153,25 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
     let (root_causes, fixes) = extract_fix_details(stdout, bug_title);
     let comment = build_zentao_comment(bug_id, bug_title, &root_causes, &fixes);
 
-    let script = "/root/.openclaw/extensions/zentao-token-refresh/zentao-write-bug.sh";
-    let escaped_comment = comment.replace("'", "'\''");
-    let result = Command::new("bash")
-        .args(["-c", &format!("{} resolve {} '{}'", script, bug_id, escaped_comment)])
-        .output();
+    // 使用 Rust ZentaoClient API 替代 shell 脚本
+    let cfg = match crate::config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("[{}] Cannot load config for Zentao resolve: {}", agent_name, e);
+            return;
+        }
+    };
+    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
 
-    match result {
-        Ok(o) if o.status.success() => {
+    // Sync wrapper: block_on the async resolve
+    let rt = tokio::runtime::Handle::current();
+    match rt.block_on(client.resolve_bug(bug_id, &comment)) {
+        Ok(()) => {
             tracing::info!("[{}] Bug #{} resolved in Zentao: fix(#{}): {}", agent_name, bug_id, bug_id, bug_title);
-            // Also log what was sent
             tracing::debug!("[{}] Zentao comment: {} chars", agent_name, comment.len());
         }
-        Ok(o) => {
-            let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
-            tracing::warn!("[{}] Zentao resolve failed for Bug #{}: {}", agent_name, bug_id, stderr_str);
-        }
         Err(e) => {
-            tracing::warn!("[{}] Zentao resolve error for Bug #{}: {}", agent_name, bug_id, e);
+            tracing::warn!("[{}] Zentao resolve failed for Bug #{}: {}", agent_name, bug_id, e);
         }
     }
 }

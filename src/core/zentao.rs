@@ -204,6 +204,30 @@ impl ZentaoClient {
         all_bugs.retain(|b| b.status.as_deref() == Some("active"));
         Ok(all_bugs)
     }
+
+    /// 解决 Bug（调用 Zentao API POST /bugs/{id}/resolve）
+    pub async fn resolve_bug(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/api.php/v1/bugs/{}/resolve",
+            self.base_url, bug_id
+        );
+        let body = serde_json::json!({
+            "resolution": "fixed",
+            "resolvedBuild": "1",
+            "comment": comment
+        });
+        let resp = self.client.post(&url)
+            .header("Token", &self.token)
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Zentao resolve API error: HTTP {} — {}", status, text);
+        }
+        Ok(())
+    }
     /// 获取 Agent 对应的禅道账号
     fn agent_account(agent_name: &str) -> &str {
         match agent_name {
