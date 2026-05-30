@@ -1149,38 +1149,83 @@ fn build_zentao_comment(bug_id: &str, bug_title: &str, root_causes: &[String], f
 }
 
 /// Resolve a bug in Zentao with structured comment after fix + quality gates pass.
+/// Agent 对应的禅道账号列表（用于判断 bug 是否分配给人类）
+const AGENT_ZENTAO_ACCOUNTS: &[&str] = &[
+    "wangyizhe", "liubei", "guanyu", "zhaoyun",
+    "xunyu", "zhangfei", "huatuo", "chenlin",
+];
+
+/// 修复后更新 Zentao —— 不改状态，只加备注；智能体分配的额外改分配
 fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str) {
     let (root_causes, fixes) = extract_fix_details(stdout, bug_title);
     let comment = build_zentao_comment(bug_id, bug_title, &root_causes, &fixes);
 
-    // Step 1: Refresh Zentao token（防止 token 过期）
+    // Step 1: Refresh Zentao token
     let _ = Command::new("bash")
         .args(["-c", &format!(
             "/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js login -s https://zentao.gentronhealth.com -u zhangfei -p Gentron@2025"
         )])
         .output();
 
-    // Step 2: 使用 zentao-cli 添加备注（不改状态，只加备注）
-    let result = Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
-        .args(["bug", "update", "--id", bug_id, "--comment", &comment])
-        .output();
+    // Step 2: 查询 bug 的 assignedTo 判断是人类还是智能体
+    let assigned_to = {
+        let cfg = crate::config::Config::load().ok();
+        if let Some(cfg) = cfg {
+            let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+            let rt = tokio::runtime::Handle::current();
+            match rt.block_on(client.get_bug(bug_id)) {
+                Ok(detail) => detail.assigned_to,
+                Err(e) => {
+                    tracing::warn!("[{}] 无法查询 Bug #{} assignedTo: {}", agent_name, bug_id, e);
+                    String::new()
+                }
+            }
+        } else {
+            String::new()
+        }
+    };
+
+    let is_agent = AGENT_ZENTAO_ACCOUNTS.iter().any(|a| assigned_to.contains(a));
+    tracing::info!("[{}] Bug #{} assignedTo={:?}, is_agent={}", agent_name, bug_id, assigned_to, is_agent);
+
+    // Step 3: 两种情况都不改状态
+    // - 人类分配：只加备注
+    // - 智能体分配：加备注 + 改分配给 zhangfei（测试）
+    let result = if is_agent {
+        // 用 --data 传 JSON 同时设置 comment 和 assignedTo
+        let escaped = comment.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
+        let data_json = format!(r#"{{"comment":"{}","assignedTo":"zhangfei"}}"#, escaped);
+        Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+            .args(["bug", "update", "--id", bug_id, "--data", &data_json])
+            .output()
+    } else {
+        Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+            .args(["bug", "update", "--id", bug_id, "--comment", &comment])
+            .output()
+    };
 
     match result {
         Ok(o) if o.status.success() => {
             let stdout_str = String::from_utf8_lossy(&o.stdout).to_string();
             if stdout_str.contains("success") || stdout_str.contains("保存成功") {
-                tracing::info!("[{}] Bug #{} 备注已添加到 Zentao: fix(#{}): {}", agent_name, bug_id, bug_id, bug_title);
+                if is_agent {
+                    tracing::info!("[{}] Bug #{} 备注已添加 + 分配已改为 zhangfei（智能体分配）: fix(#{}): {}",
+                        agent_name, bug_id, bug_id, bug_title);
+                } else {
+                    tracing::info!("[{}] Bug #{} 备注已添加（人类分配，不改状态不改分配）: fix(#{}): {}",
+                        agent_name, bug_id, bug_id, bug_title);
+                }
                 tracing::debug!("[{}] Zentao comment: {} chars", agent_name, comment.len());
             } else {
-                tracing::warn!("[{}] Bug #{} 备注添加结果异常: {}", agent_name, bug_id, stdout_str);
+                tracing::warn!("[{}] Bug #{} 操作结果异常: {}", agent_name, bug_id, stdout_str);
             }
         }
         Ok(o) => {
             let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
-            tracing::warn!("[{}] Zentao 备注添加失败 for Bug #{}: {}", agent_name, bug_id, stderr_str);
+            tracing::warn!("[{}] Zentao 操作失败 for Bug #{}: {}", agent_name, bug_id, stderr_str);
         }
         Err(e) => {
-            tracing::warn!("[{}] Zentao 备注添加错误 for Bug #{}: {}", agent_name, bug_id, e);
+            tracing::warn!("[{}] Zentao 操作错误 for Bug #{}: {}", agent_name, bug_id, e);
         }
     }
 }
