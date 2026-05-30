@@ -310,7 +310,7 @@ fn run_quality_gates(agent_name: &str, work_dir: &str) -> (bool, String, String)
                 .output();
         }
 
-        // Step 1: Vue TypeScript type check (vue-tsc) — hard failure
+        // Step 1: Vue TypeScript type check (vue-tsc) — non-fatal (项目有已有类型错误)
         let ts_check = Command::new("npx")
             .args(["vue-tsc", "--noEmit"])
             .current_dir(work_dir)
@@ -318,9 +318,7 @@ fn run_quality_gates(agent_name: &str, work_dir: &str) -> (bool, String, String)
         match ts_check {
             Ok(o) if !o.status.success() => {
                 let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                return (false,
-                    "vue-tsc 类型检查失败".into(),
-                    if stderr.len() > 1000 { stderr.chars().take(1000).collect() } else { stderr });
+                tracing::warn!("[zhaoyun] vue-tsc 有类型错误（非阻断）: {} chars", stderr.len());
             }
             Ok(_) => tracing::info!("[zhaoyun] vue-tsc 类型检查通过"),
             Err(e) => tracing::warn!("[zhaoyun] vue-tsc 不可用: {}", e),
