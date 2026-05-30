@@ -931,8 +931,19 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
     let (root_causes, fixes) = extract_fix_details(stdout, bug_title);
     let commit_msg = build_zentao_comment(bug_id, bug_title, &root_causes, &fixes);
 
+    // 校验提交信息质量：至少包含非空根因或修复方案
+    let final_msg = if root_causes.iter().all(|c| c.contains("存在的问题") || c.contains("修改相关"))
+        && fixes.iter().all(|f| f == "修改相关代码文件") {
+        // 退化信息，用更具体的模板
+        format!("fix(#{}): {}
+
+由 AI Agent ({}) 自动修复，请查看 diff 确认变更内容。", bug_id, bug_title, agent_name)
+    } else {
+        commit_msg
+    };
+
     let _ = Command::new("git")
-        .args(["-C", &worktree, "commit", "-m", &commit_msg])
+        .args(["-C", &worktree, "commit", "-m", &final_msg])
         .output();
 
     // Push to remote agent branch
