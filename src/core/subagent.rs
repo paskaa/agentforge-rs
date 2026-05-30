@@ -810,18 +810,25 @@ fn run_codex_fix_impl(
                 auto_commit_fix(agent_name, bug_id, bug_title, &stdout);
             }
 
-            // Step 7: Resolve bug in Zentao — only if all checks passed
+            // Step 7: Update Zentao — 不管成功失败都写备注
             if ok_to_commit {
                 resolve_bug_in_zentao(agent_name, bug_id, bug_title, &stdout);
-            } else if success && !gates_passed {
-                tracing::warn!("[{}] Bug #{} fix succeeded but quality gates failed — NOT committing or resolving. Manual review needed.",
-                    agent_name, bug_id);
-            } else if success && !migrations_passed {
-                tracing::warn!("[{}] Bug #{} fix succeeded but DB migrations FAILED — NOT committing or resolving. Manual review needed.",
-                    agent_name, bug_id);
-            } else if success && !sql_valid {
-                tracing::warn!("[{}] Bug #{} fix succeeded but Mapper SQL 语法验证 FAILED — NOT committing or resolving. Manual review needed.",
-                    agent_name, bug_id);
+            } else if !success {
+                // Codex 修复本身失败
+                let fail_comment = format!("【{}】Bug #{} Codex 修复失败，未能产生有效变更。需人工排查。", agent_name, bug_id);
+                comment_in_zentao(bug_id, &fail_comment);
+            } else if !gates_passed {
+                tracing::warn!("[{}] Bug #{} quality gates failed", agent_name, bug_id);
+                let fail_comment = format!("【{}】Bug #{} 代码已修改但未通过质量门禁（vue-tsc 类型检查），代码已保存到 Agent 分支待人工审查。", agent_name, bug_id);
+                comment_in_zentao(bug_id, &fail_comment);
+            } else if !migrations_passed {
+                tracing::warn!("[{}] Bug #{} DB migrations FAILED", agent_name, bug_id);
+                let fail_comment = format!("【{}】Bug #{} 代码已修改但 DB 迁移脚本验证失败，代码已保存到 Agent 分支待人工审查。", agent_name, bug_id);
+                comment_in_zentao(bug_id, &fail_comment);
+            } else if !sql_valid {
+                tracing::warn!("[{}] Bug #{} SQL validation FAILED", agent_name, bug_id);
+                let fail_comment = format!("【{}】Bug #{} 代码已修改但 Mapper SQL 语法验证失败，代码已保存到 Agent 分支待人工审查。", agent_name, bug_id);
+                comment_in_zentao(bug_id, &fail_comment);
             }
 
             CodexResult {
@@ -1149,6 +1156,36 @@ fn build_zentao_comment(bug_id: &str, bug_title: &str, root_causes: &[String], f
 }
 
 /// Resolve a bug in Zentao with structured comment after fix + quality gates pass.
+/// 只加备注不改状态（成功和失败都用）
+fn comment_in_zentao(bug_id: &str, comment: &str) {
+    // Refresh token
+    let _ = Command::new("bash")
+        .args(["-c", "/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js login -s https://zentao.gentronhealth.com -u zhangfei -p Gentron@2025"])
+        .output();
+
+    let result = Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+        .args(["bug", "update", "--id", bug_id, "--comment", comment])
+        .output();
+
+    match result {
+        Ok(o) if o.status.success() => {
+            let stdout_str = String::from_utf8_lossy(&o.stdout).to_string();
+            if stdout_str.contains("success") || stdout_str.contains("保存成功") {
+                tracing::info!("[zentao] Bug #{} 备注已添加", bug_id);
+            } else {
+                tracing::warn!("[zentao] Bug #{} 备注异常: {}", bug_id, stdout_str);
+            }
+        }
+        Ok(o) => {
+            let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
+            tracing::warn!("[zentao] Bug #{} 备注失败: {}", bug_id, stderr_str);
+        }
+        Err(e) => {
+            tracing::warn!("[zentao] Bug #{} 备注错误: {}", bug_id, e);
+        }
+    }
+}
+
 /// Agent 对应的禅道账号列表（用于判断 bug 是否分配给人类）
 const AGENT_ZENTAO_ACCOUNTS: &[&str] = &[
     "wangyizhe", "liubei", "guanyu", "zhaoyun",
