@@ -1,0 +1,88 @@
+redis:
+  host: "127.0.0.1"
+  port: 16379
+  db: 0
+
+llm:
+  api_base: "${DASHSCOPE_API_BASE}"
+  api_key: "${DASHSCOPE_API_KEY}"
+  default_model: "qwen3.6-plus"
+  coding_model: "qwen-coder-plus"
+  fallback:
+    api_base: "https://openrouter.ai/api/v1"
+    api_key: "${OPENROUTER_API_KEY}"
+    default_model: "z-ai/glm-4.5-air:free"
+    coding_model: "z-ai/glm-4.5-air:free"
+    extra_models:
+      - "qwen/qwen3-coder:free"
+      - "mimo-v2.5"
+      - "qwen/qwen3-next-80b-a3b-instruct:free"
+      - "openai/gpt-oss-120b:free"
+      - "nvidia/nemotron-3-super-120b-a12b:free"
+      - "meta-llama/llama-3.3-70b-instruct:free"
+      - "openai/gpt-oss-20b:free"
+      - "google/gemma-4-31b-it:free"
+      - "google/gemma-4-26b-a4b-it:free"
+      - "nousresearch/hermes-3-llama-3.1-405b:free"
+      - "z-ai/glm-4.5-air:free"
+      - "minimax/minimax-m2.5:free"
+      - "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+      - "nvidia/nemotron-3-nano-30b-a3b:free"
+      - "nvidia/nemotron-nano-12b-v2-vl:free"
+      - "nvidia/nemotron-nano-9b-v2:free"
+      - "meta-llama/llama-3.2-3b-instruct:free"
+      - "baidu/cobuddy:free"
+      - "arcee-ai/trinity-large-thinking:free"
+      - "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
+      - "liquid/lfm-2.5-1.2b-thinking:free"
+      - "liquid/lfm-2.5-1.2b-instruct:free"
+      - "poolside/laguna-m.1:free"
+      - "poolside/laguna-xs.2:free"
+
+feishu:
+  app_id: "cli_a95e736346269bcd"
+  app_secret: "${FEISHU_APP_SECRET}"
+  group_chat_id: "oc_856716cb424463b36289adbfa71a886b"
+
+zentao:
+  base_url: "https://zentao.gentronhealth.com"
+  scripts_dir: "/root/.openclaw/extensions/zentao-token-refresh"
+  token_file: "/root/.config/zentao/.env"
+
+agents:
+  zhugeliang:
+    name: "诸葛亮"
+    role: "架构师"
+    expertise: ["架构", "设计", "方案"]
+  liubei:
+    name: "刘备"
+    role: "项目经理"
+    expertise: ["汇总", "管理", "分配"]
+  guanyu:
+    name: "关羽"
+    role: "后端开发"
+    expertise: ["java", "spring", "api"]
+  zhaoyun:
+    name: "赵云"
+    role: "前端开发"
+    expertise: ["vue", "前端", "界面"]
+  xunyu:
+    name: "荀彧"
+    role: "DBA"
+    expertise: ["数据库", "sql"]
+  zhangfei:
+    name: "张飞"
+    role: "测试"
+    expertise: ["测试", "bug"]
+  huatuo:
+    name: "华佗"
+    role: "产品经理"
+    expertise: ["产品", "需求"]
+  chenlin:
+    name: "陈琳"
+    role: "文档专员"
+    expertise: ["文档", "wiki"]
+
+scheduler:
+  enabled: true
+  tasks_file: "./config/scheduler_tasks.json"

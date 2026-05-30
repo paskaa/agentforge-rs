@@ -4,3 +4,10 @@
 .DS_Store
 *.swp
 *.swo
+
+# Secrets
+.env
+.env.*
+*.env
+config/secrets/
+config/local/
