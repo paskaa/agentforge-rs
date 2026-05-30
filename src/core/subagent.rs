@@ -1153,25 +1153,34 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
     let (root_causes, fixes) = extract_fix_details(stdout, bug_title);
     let comment = build_zentao_comment(bug_id, bug_title, &root_causes, &fixes);
 
-    // 使用 Rust ZentaoClient API 替代 shell 脚本
-    let cfg = match crate::config::Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("[{}] Cannot load config for Zentao resolve: {}", agent_name, e);
-            return;
-        }
-    };
-    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+    // Step 1: Refresh Zentao token（防止 token 过期）
+    let _ = Command::new("bash")
+        .args(["-c", &format!(
+            "/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js login -s https://zentao.gentronhealth.com -u zhangfei -p Gentron@2025"
+        )])
+        .output();
 
-    // Sync wrapper: block_on the async resolve
-    let rt = tokio::runtime::Handle::current();
-    match rt.block_on(client.resolve_bug(bug_id, &comment)) {
-        Ok(()) => {
-            tracing::info!("[{}] Bug #{} resolved in Zentao: fix(#{}): {}", agent_name, bug_id, bug_id, bug_title);
-            tracing::debug!("[{}] Zentao comment: {} chars", agent_name, comment.len());
+    // Step 2: 使用 zentao-cli 添加备注（不改状态，只加备注）
+    let result = Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+        .args(["bug", "update", "--id", bug_id, "--comment", &comment])
+        .output();
+
+    match result {
+        Ok(o) if o.status.success() => {
+            let stdout_str = String::from_utf8_lossy(&o.stdout).to_string();
+            if stdout_str.contains("success") || stdout_str.contains("保存成功") {
+                tracing::info!("[{}] Bug #{} 备注已添加到 Zentao: fix(#{}): {}", agent_name, bug_id, bug_id, bug_title);
+                tracing::debug!("[{}] Zentao comment: {} chars", agent_name, comment.len());
+            } else {
+                tracing::warn!("[{}] Bug #{} 备注添加结果异常: {}", agent_name, bug_id, stdout_str);
+            }
+        }
+        Ok(o) => {
+            let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
+            tracing::warn!("[{}] Zentao 备注添加失败 for Bug #{}: {}", agent_name, bug_id, stderr_str);
         }
         Err(e) => {
-            tracing::warn!("[{}] Zentao resolve failed for Bug #{}: {}", agent_name, bug_id, e);
+            tracing::warn!("[{}] Zentao 备注添加错误 for Bug #{}: {}", agent_name, bug_id, e);
         }
     }
 }
