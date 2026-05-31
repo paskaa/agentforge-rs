@@ -1,134 +1,204 @@
 <template>
-  <div class="analytics">
-    <h1>📈 L4 量化分析</h1>
-
-    <div class="controls">
-      <button @click="refresh" class="btn" :disabled="loading">
-        {{ loading ? '加载中...' : '🔄 刷新数据' }}
-      </button>
+  <div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+      <h1 style="font-size:22px">📈 L4/L5 分析</h1>
+      <el-button :icon="Refresh" circle @click="refresh" :loading="loading" />
     </div>
 
-    <!-- Pipeline overview -->
-    <div class="section">
-      <h2>Pipeline 概览</h2>
-      <div class="stats-grid">
-        <div class="stat-card"><div class="stat-value">{{ report.pipeline?.total_scanned || 0 }}</div><div class="stat-label">扫描总数</div></div>
-        <div class="stat-card success"><div class="stat-value">{{ report.pipeline?.total_success || 0 }}</div><div class="stat-label">成功</div></div>
-        <div class="stat-card danger"><div class="stat-value">{{ report.pipeline?.total_failed || 0 }}</div><div class="stat-label">失败</div></div>
-        <div class="stat-card info"><div class="stat-value">{{ avgTime }}</div><div class="stat-label">平均耗时</div></div>
-      </div>
-    </div>
+    <!-- Pipeline 概览 -->
+    <el-card shadow="never" style="margin-bottom:20px">
+      <template #header>Pipeline 概览</template>
+      <el-row :gutter="16">
+        <el-col :span="6">
+          <el-statistic title="扫描总数" :value="pipeline.total_scanned || 0" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="成功" :value="pipeline.total_success || 0">
+            <template #suffix><span style="color:#22c55e;font-size:12px">✅</span></template>
+          </el-statistic>
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="失败" :value="pipeline.total_failed || 0">
+            <template #suffix><span style="color:#ef4444;font-size:12px">❌</span></template>
+          </el-statistic>
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="平均耗时" :value="avgTime" />
+        </el-col>
+      </el-row>
+    </el-card>
 
-    <!-- Agent performance -->
-    <div class="section">
-      <h2>智能体绩效</h2>
-      <div class="chart-container">
-        <div v-for="am in report.agent_metrics || []" :key="am.agent_id" class="metric-row">
-          <div class="metric-name">{{ agentLabel(am.agent_id) }}</div>
-          <div class="metric-bar-wrap">
-            <div class="metric-bar" :style="{ width: am.success_rate + '%' }" :class="barClass(am.success_rate)"></div>
-          </div>
-          <div class="metric-values">
-            <span class="metric-rate" :class="textClass(am.success_rate)">{{ am.success_rate.toFixed(1) }}%</span>
-            <span class="metric-count">{{ am.success_count }}/{{ am.total_fixes }}</span>
-            <span class="metric-time">{{ (am.avg_duration_s || 0).toFixed(0) }}s</span>
-          </div>
+    <!-- L5 自优化评分 -->
+    <el-card shadow="never" style="margin-bottom:20px">
+      <template #header>
+        <span style="display:flex;align-items:center;gap:8px">
+          🧠 L5 自优化评分
+          <el-tag type="success" size="small" effect="dark">AI 驱动</el-tag>
+        </span>
+      </template>
+      <el-table :data="scores" stripe style="width:100%">
+        <el-table-column label="排名" width="60">
+          <template #default="{ $index }">
+            <el-tag :type="$index < 3 ? 'warning' : 'info'" size="small" effect="dark">#{{ $index + 1 }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="智能体" width="140">
+          <template #default="{ row }">
+            <span style="display:flex;align-items:center;gap:6px">
+              <span>{{ agentIcon(row.agent_id) }}</span>
+              <span>{{ agentName(row.agent_id) }}</span>
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="综合评分" width="200">
+          <template #default="{ row }">
+            <el-progress
+              :percentage="Math.round(row.overall_score || 0)"
+              :stroke-width="16"
+              :color="scoreColor(row.overall_score)"
+              text-inside
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="成功率" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.success_rate > 50 ? 'success' : row.success_rate > 20 ? 'warning' : 'danger'" size="small">
+              {{ (row.success_rate || 0).toFixed(0) }}%
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="平均耗时" width="100">
+          <template #default="{ row }">
+            {{ (row.avg_duration_s || 0).toFixed(0) }}s
+          </template>
+        </el-table-column>
+        <el-table-column label="Bug 类型评分">
+          <template #default="{ row }">
+            <div style="display:flex;gap:4px;flex-wrap:wrap">
+              <el-tag v-for="(score, type) in row.bug_type_scores" :key="type" size="small" effect="plain"
+                :type="score > 60 ? 'success' : score > 40 ? 'warning' : 'danger'">
+                {{ type }}: {{ score.toFixed(0) }}
+              </el-tag>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <!-- L5 生成的额外约束 -->
+    <el-card shadow="never" style="margin-bottom:20px" v-if="Object.keys(constraints).length > 0">
+      <template #header>
+        <span style="display:flex;align-items:center;gap:8px">
+          📋 L5 自动优化约束
+          <el-tag type="primary" size="small">{{ totalConstraints }} 条</el-tag>
+        </span>
+      </template>
+      <div v-for="(cons, agent) in constraints" :key="agent" style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span>{{ agentIcon(agent) }}</span>
+          <span style="font-weight:600;font-size:13px">{{ agentName(agent) }}</span>
+          <el-tag size="small">{{ cons.length }} 条</el-tag>
+        </div>
+        <div style="padding-left:28px">
+          <el-tag v-for="(c, i) in cons" :key="i" type="info" effect="plain" style="margin:2px 4px 2px 0;font-size:11px">
+            {{ c.substring(0, 80) }}{{ c.length > 80 ? '...' : '' }}
+          </el-tag>
         </div>
       </div>
-    </div>
+    </el-card>
 
-    <!-- Failure patterns -->
-    <div class="section" v-if="report.failure_patterns?.length">
-      <h2>失败模式</h2>
-      <table class="data-table">
-        <thead><tr><th>错误类别</th><th>次数</th><th>涉及 Agent</th></tr></thead>
-        <tbody>
-          <tr v-for="(fp, i) in report.failure_patterns.slice(0, 10)" :key="i">
-            <td>{{ fp.error_category?.substring(0, 60) || '?' }}</td>
-            <td class="count">{{ fp.count }}</td>
-            <td>{{ fp.agents?.join(', ') }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Recommendations -->
-    <div class="section" v-if="report.recommendations?.length">
-      <h2>优化建议</h2>
-      <div class="rec-list">
-        <div v-for="(rec, i) in report.recommendations" :key="i" class="rec-item">{{ rec }}</div>
+    <!-- 智能体绩效 -->
+    <el-card shadow="never" style="margin-bottom:20px">
+      <template #header>📊 智能体绩效</template>
+      <div v-for="am in report.agent_metrics || []" :key="am.agent_id" style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+        <span style="width:100px;font-size:13px;display:flex;align-items:center;gap:4px">
+          <span>{{ agentIcon(am.agent_id) }}</span>
+          <span>{{ agentName(am.agent_id) }}</span>
+        </span>
+        <el-progress
+          :percentage="Math.round(am.success_rate)"
+          :stroke-width="18"
+          :color="am.success_rate > 50 ? '#22c55e' : am.success_rate > 20 ? '#f59e0b' : '#ef4444'"
+          style="flex:1"
+        />
+        <div style="width:160px;display:flex;gap:8px;font-size:12px;color:#64748b">
+          <span>{{ am.success_count }}/{{ am.total_fixes }}</span>
+          <span>{{ (am.avg_duration_s || 0).toFixed(0) }}s</span>
+        </div>
       </div>
-    </div>
+    </el-card>
+
+    <!-- 失败模式 -->
+    <el-card shadow="never" style="margin-bottom:20px" v-if="report.failure_patterns?.length">
+      <template #header>🔍 失败模式</template>
+      <el-table :data="report.failure_patterns.slice(0, 10)" stripe size="small">
+        <el-table-column prop="error_category" label="错误类别" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="count" label="次数" width="80" sortable>
+          <template #default="{ row }">
+            <el-tag type="danger" size="small">{{ row.count }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="涉及 Agent" width="200">
+          <template #default="{ row }">
+            <el-tag v-for="a in row.agents" :key="a" size="small" type="info" effect="plain" style="margin:1px">{{ agentName(a) }}</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <!-- 优化建议 -->
+    <el-card shadow="never" v-if="report.recommendations?.length">
+      <template #header>💡 优化建议</template>
+      <div v-for="(rec, i) in report.recommendations" :key="i" style="padding:8px 0;border-bottom:1px solid #334155;font-size:13px">
+        {{ rec }}
+      </div>
+    </el-card>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { Refresh } from '@element-plus/icons-vue'
 
 const report = ref({})
+const scores = ref([])
+const constraints = ref({})
 const loading = ref(false)
 
-const agentLabels = { guanyu: '⚔️ 关羽', zhaoyun: '🐉 赵云', xunyu: '📚 荀彧', zhangfei: '🔥 张飞', huatuo: '💊 华佗', chenlin: '📝 陈琳', liubei: '👑 刘备', zhugeliang: '🪶 诸葛亮' }
-function agentLabel(id) { return agentLabels[id] || id }
-function barClass(r) { return r >= 70 ? 'bar-good' : r >= 40 ? 'bar-mid' : 'bar-bad' }
-function textClass(r) { return r >= 70 ? 'text-good' : r >= 40 ? 'text-mid' : 'text-bad' }
+const pipeline = computed(() => report.value.pipeline || {})
+const avgTime = computed(() => ((pipeline.value.avg_fix_time_ms || 0) / 1000).toFixed(0) + 's')
+const totalConstraints = computed(() => Object.values(constraints.value).reduce((s, c) => s + c.length, 0))
 
-const avgTime = computed(() => {
-  const t = report.value.pipeline?.avg_fix_time_ms || 0
-  return (t / 1000).toFixed(0) + 's'
-})
+const agentIcons = { guanyu:'⚔️', zhaoyun:'🐉', xunyu:'📚', zhangfei:'🔥', huatuo:'💊', chenlin:'📝', liubei:'👑', zhugeliang:'🪶' }
+const agentNames = { guanyu:'关羽', zhaoyun:'赵云', xunyu:'荀彧', zhangfei:'张飞', huatuo:'华佗', chenlin:'陈琳', liubei:'刘备', zhugeliang:'诸葛亮' }
+function agentIcon(id) { return agentIcons[id] || '🤖' }
+function agentName(id) { return agentNames[id] || id }
+function scoreColor(s) {
+  if (s >= 60) return '#22c55e'
+  if (s >= 40) return '#3b82f6'
+  if (s >= 25) return '#f59e0b'
+  return '#ef4444'
+}
 
 async function refresh() {
   loading.value = true
   try {
-    const r = await fetch('/api/analytics')
-    report.value = await r.json()
-  } catch { report.value = {} }
+    const [analyticsRes, scoresRes] = await Promise.all([
+      fetch('/api/analytics'),
+      fetch('/api/scores')
+    ])
+    report.value = await analyticsRes.json()
+    const scoresData = await scoresRes.json()
+    scores.value = (scoresData.scores || []).sort((a, b) => (b.overall_score || 0) - (a.overall_score || 0))
+
+    // Load L5 constraints
+    try {
+      const consRes = await fetch('/api/constraints')
+      constraints.value = await consRes.json()
+    } catch {}
+  } catch {}
   loading.value = false
 }
 
 onMounted(refresh)
 </script>
-
-<style scoped>
-.analytics h1 { font-size: 24px; margin-bottom: 16px; }
-.controls { margin-bottom: 24px; }
-.btn { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; }
-.btn:hover { background: #2563eb; }
-.btn:disabled { opacity: 0.5; }
-
-.section { margin-bottom: 32px; }
-.section h2 { font-size: 18px; margin-bottom: 16px; color: #cbd5e1; }
-
-.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
-.stat-card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
-.stat-card.success { border-left: 4px solid #22c55e; }
-.stat-card.danger { border-left: 4px solid #ef4444; }
-.stat-card.info { border-left: 4px solid #3b82f6; }
-.stat-value { font-size: 28px; font-weight: 700; }
-.stat-label { font-size: 13px; color: #94a3b8; margin-top: 4px; }
-
-.chart-container { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
-.metric-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.metric-name { width: 100px; font-size: 13px; font-weight: 500; }
-.metric-bar-wrap { flex: 1; height: 20px; background: #334155; border-radius: 4px; overflow: hidden; }
-.metric-bar { height: 100%; border-radius: 4px; transition: width 0.5s; }
-.bar-good { background: linear-gradient(90deg, #22c55e, #16a34a); }
-.bar-mid { background: linear-gradient(90deg, #f59e0b, #d97706); }
-.bar-bad { background: linear-gradient(90deg, #ef4444, #dc2626); }
-.metric-values { width: 200px; display: flex; gap: 12px; font-size: 12px; color: #94a3b8; }
-.metric-rate { font-weight: 600; width: 50px; }
-.text-good { color: #22c55e; }
-.text-mid { color: #f59e0b; }
-.text-bad { color: #ef4444; }
-.metric-count { width: 50px; }
-.metric-time { width: 50px; }
-
-.data-table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }
-.data-table th, .data-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #334155; font-size: 13px; }
-.data-table th { color: #64748b; background: #0f172a; }
-.count { font-weight: 600; color: #f59e0b; }
-
-.rec-list { display: flex; flex-direction: column; gap: 8px; }
-.rec-item { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 16px; font-size: 13px; }
-</style>

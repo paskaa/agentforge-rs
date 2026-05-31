@@ -269,6 +269,17 @@ async fn agent_traces(
 
 // ── Zentao Stats API ──
 
+async fn constraints_api() -> impl IntoResponse {
+    let path = "/var/lib/agentforge/agent_scores.json.constraints";
+    match std::fs::read_to_string(path) {
+        Ok(data) => {
+            let v: serde_json::Value = serde_json::from_str(&data).unwrap_or(serde_json::json!({}));
+            Json(v)
+        }
+        Err(_) => Json(serde_json::json!({})),
+    }
+}
+
 async fn zentao_stats_api(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     // Check cache (60s TTL)
     {
@@ -466,6 +477,7 @@ pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Re
         .route("/api/agent/:id/traces", get(agent_traces))
         .route("/api/queues", get(queues_api))
         .route("/api/zentao/stats", get(zentao_stats_api))
+        .route("/api/constraints", get(constraints_api))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
         .layer(CorsLayer::permissive())
