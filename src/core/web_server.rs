@@ -397,7 +397,7 @@ async fn fetch_zentao_stats(_pool: &Option<SqlitePool>) -> ZentaoStats {
             status: b.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             assigned_to: assignee,
             severity: b.get("severity").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            url: format!("https://zentao.gentronhealth.com/bug-view-{}.html", bug_id),
+            url: format!("https://zentao.gentronhealth.com/index.php?m=bug&f=view&bugID={}", bug_id),
         }
     }).collect();
 
