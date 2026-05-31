@@ -137,48 +137,85 @@ impl Analytics {
             .collect::<Vec<_>>()
     }
 
-    /// Get failure patterns grouped by error category.
+    /// Get failure patterns grouped by real error category (not raw message text).
     pub async fn failure_patterns(&self) -> Vec<FailurePattern> {
-        let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
             r#"
             SELECT
-                COALESCE(message, 'unknown') as error_cat,
-                COUNT(*) as cnt,
-                agent_id,
+                COALESCE(agent_id, '') as agent_id,
+                COALESCE(message, '') as message,
                 COALESCE(task_id, '') as task_id
             FROM traces
-            WHERE status = 'failed' OR status = 'error'
-            GROUP BY error_cat, agent_id
-            ORDER BY cnt DESC
+            WHERE (event = 'fix_done' AND (status = 'failed' OR status = 'error'))
+               OR (event = 'fix_attempt' AND (status = 'failed' OR status = 'error'))
+            ORDER BY ts DESC
             "#,
         )
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default();
 
-        // Merge by error category
-        let mut patterns: Vec<FailurePattern> = Vec::new();
-        for (cat, cnt, agent, task) in rows {
-            let agent = normalize_agent_id(&agent);
-            if let Some(existing) = patterns.iter_mut().find(|p| p.error_category == cat) {
-                existing.count += cnt;
-                if !existing.agents.contains(&agent) {
-                    existing.agents.push(agent);
-                }
-                if !task.is_empty() && existing.example_bugs.len() < 3 {
-                    existing.example_bugs.push(task);
-                }
+        let mut categories: std::collections::HashMap<String, (i64, Vec<String>, Vec<String>)> =
+            std::collections::HashMap::new();
+
+        for (agent_id, message, task_id) in &rows {
+            let agent = normalize_agent_id(agent_id);
+            let msg = message.trim();
+
+            // Skip noise: empty, attempt=N, HEAD is now at, Creating isolate
+            if msg.is_empty() || msg.starts_with("attempt=") || msg.starts_with("HEAD is")
+                || msg.contains("Creating isolate") || msg.contains("Claude Code") {
+                continue;
+            }
+
+            let category = if msg.contains("编译") || msg.contains("compile") || msg.contains("Cargo") || msg.contains("cargo check") {
+                "编译失败"
+            } else if msg.contains("合并冲突") || msg.contains("merge conflict") || msg.contains("Merge remote") {
+                "Git 合并冲突"
+            } else if msg.contains("超时") || msg.contains("timeout") || msg.contains("timed out") {
+                "请求超时"
+            } else if msg.contains("rate limit") || msg.contains("429") || msg.contains("API error") {
+                "API 限流"
+            } else if msg.contains("max retries") || msg.contains("最大重试") {
+                "超过最大重试次数"
+            } else if msg.contains("lock") || msg.contains("锁定") {
+                "锁冲突"
+            } else if msg.contains("null") || msg.contains("None") || msg.contains("空指针") {
+                "空指针/空值异常"
+            } else if msg.contains("SQL") || msg.contains("sql") || msg.contains("数据库") || msg.contains("查询") {
+                "SQL/数据库错误"
+            } else if msg.contains("类型") || msg.contains("type") || msg.contains("mismatch") {
+                "类型不匹配"
+            } else if msg.contains("权限") || msg.contains("auth") || msg.contains("403") || msg.contains("401") {
+                "权限/鉴权错误"
+            } else if msg.contains("前端") || msg.contains("vue") || msg.contains("Vue") || msg.contains("组件") {
+                "前端组件错误"
+            } else if msg.contains("API") || msg.contains("接口") || msg.contains("request") {
+                "API/接口错误"
+            } else if msg.contains("文件") || msg.contains("file") || msg.contains("路径") {
+                "文件/路径错误"
             } else {
-                patterns.push(FailurePattern {
-                    error_category: cat,
-                    count: cnt,
-                    agents: vec![agent],
-                    example_bugs: if task.is_empty() { vec![] } else { vec![task] },
-                });
+                "其他错误"
+            };
+
+            let entry = categories.entry(category.to_string()).or_insert((0, Vec::new(), Vec::new()));
+            entry.0 += 1;
+            if !entry.1.contains(&agent) {
+                entry.1.push(agent);
+            }
+            let bug_id = task_id.trim_start_matches("Bug#").to_string();
+            if !bug_id.is_empty() && bug_id != "?" && !entry.2.contains(&bug_id) && entry.2.len() < 5 {
+                entry.2.push(bug_id);
             }
         }
-        patterns.sort_by(|a, b| b.count.cmp(&a.count));
-        patterns
+
+        let mut result: Vec<FailurePattern> = categories.into_iter()
+            .map(|(error_category, (count, agents, example_bugs))| {
+                FailurePattern { error_category, count, agents, example_bugs }
+            })
+            .collect();
+        result.sort_by(|a, b| b.count.cmp(&a.count));
+        result
     }
 
     /// Get pipeline throughput metrics.
@@ -320,7 +357,7 @@ impl Analytics {
         );
 
         AnalyticsReport {
-            generated_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            generated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
             agent_metrics,
             failure_patterns,
             pipeline,

@@ -116,8 +116,8 @@ pub fn build_fix_task(bid: &str, title: &str, fixer: &str) -> serde_json::Value 
         "sender_id": "liubei",
         "chat_id": "",
         "is_dm": "true",
-        "msg_id": format!("pm-routed-{}-{}", bid, chrono::Utc::now().timestamp()),
-        "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "msg_id": format!("pm-routed-{}-{}", bid, chrono::Local::now().timestamp()),
+        "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
     })
 }
 

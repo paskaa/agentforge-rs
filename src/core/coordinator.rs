@@ -184,8 +184,8 @@ pub async fn submit_fix_cli(bug_id: &str, bug_title: &str, fixer: &str) -> anyho
         "sender_id": "hermes",
         "chat_id": "",
         "is_dm": "true",
-        "msg_id": format!("hermes-fix-{}", chrono::Utc::now().timestamp()),
-        "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "msg_id": format!("hermes-fix-{}", chrono::Local::now().timestamp()),
+        "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
     });
     
     let queue = format!("agent-work-queue:fix:{}", fixer);
@@ -222,8 +222,8 @@ pub async fn assign_bug_cli(bug_id: &str, fixer: &str) -> anyhow::Result<()> {
         "sender_id": "hermes",
         "chat_id": "",
         "is_dm": "true",
-        "msg_id": format!("hermes-assign-{}", chrono::Utc::now().timestamp()),
-        "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "msg_id": format!("hermes-assign-{}", chrono::Local::now().timestamp()),
+        "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
     });
     
     let queue = format!("agent-work-queue:fix:{}", fixer);
@@ -374,8 +374,8 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
             "sender_id": "pipeline",
             "chat_id": "",
             "is_dm": "true",
-            "msg_id": format!("pipeline-fix-{}-{}", bug_id, chrono::Utc::now().timestamp()),
-            "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "msg_id": format!("pipeline-fix-{}-{}", bug_id, chrono::Local::now().timestamp()),
+            "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         });
 
         let queue = format!("agent-work-queue:fix:{}", fixer);

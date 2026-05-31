@@ -1,6 +1,6 @@
 //! SQLite trace store — records agent activity for analytics and debugging.
 
-use chrono::Utc;
+use chrono::Local;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
 use std::path::Path;
@@ -84,7 +84,7 @@ impl TraceStore {
         duration_ms: Option<i64>,
         status: Option<&str>,
     ) {
-        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
+        let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
         let _ = sqlx::query(
             "INSERT INTO traces (ts, agent_id, event, task_id, message, tool, model, duration_ms, status) VALUES (?,?,?,?,?,?,?,?,?)",
         )

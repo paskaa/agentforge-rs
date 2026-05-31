@@ -32,11 +32,13 @@
         </router-link>
       </el-col>
       <el-col :span="6">
-        <el-card shadow="hover" class="stat-card info" body-style="padding:20px">
-          <el-statistic title="运行 Agent" :value="stats.running || 0">
-            <template #suffix><span style="font-size:12px">🤖</span></template>
-          </el-statistic>
-        </el-card>
+        <router-link to="/agents" style="text-decoration:none;color:inherit">
+          <el-card shadow="hover" class="stat-card info" body-style="padding:20px">
+            <el-statistic title="运行 Agent" :value="stats.running || 0">
+              <template #suffix><span style="font-size:12px;color:#3b82f6">🔍</span></template>
+            </el-statistic>
+          </el-card>
+        </router-link>
       </el-col>
     </el-row>
 
@@ -72,7 +74,7 @@
     <!-- 最近修复 -->
     <el-card shadow="never">
       <template #header>📝 最近修复</template>
-      <el-table :data="recent" stripe style="width:100%" max-height="300">
+      <el-table :data="recent" stripe style="width:100%" max-height="300" :default-sort="{ prop: 'ts', order: 'descending' }">
         <el-table-column prop="bug" label="Bug" width="80">
           <template #default="{ row }">
             <span style="font-family:monospace;color:#60a5fa">#{{ row.bug }}</span>
@@ -85,7 +87,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="dur" label="耗时" width="80" />
-        <el-table-column prop="ts" label="时间">
+        <el-table-column prop="ts" label="时间" sortable>
           <template #default="{ row }">
             <span style="color:#64748b;font-size:12px">{{ row.ts }}</span>
           </template>
@@ -98,11 +100,16 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
+import { Link } from '@element-plus/icons-vue'
 
 const stats = ref({})
 const zentao = ref({})
 const agents = ref([])
 const recent = ref([])
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detailData = ref(null)
+const detailTraces = ref([])
 let pollTimer = null
 
 async function fetchAll() {
@@ -124,6 +131,33 @@ onMounted(() => {
   fetchAll()
   pollTimer = setInterval(fetchAll, 15000)
 })
+function zentaoBugUrl(bugId) {
+  const id = String(bugId || '').replace('Bug#', '')
+  return `https://zentao.gentronhealth.com/index.php?m=bug&f=view&bugID=${id}`
+}
+
+async function showDetail(row) {
+  detailVisible.value = true
+  detailLoading.value = true
+  detailData.value = row
+  detailTraces.value = []
+  try {
+    const bugId = row.bug
+    // Fetch all traces for this bug
+    const [trRes, zenRes] = await Promise.all([
+      fetch(`/api/agent/${row.agent}/traces/rt`),
+      fetch('/api/zentao/stats')
+    ])
+    const trData = await trRes.json()
+    const zenData = await zenRes.json()
+    // Filter traces for this bug
+    detailTraces.value = (trData.traces || []).filter(t => t.task_id && t.task_id.includes(bugId))
+    // Find bug info from zentao
+    detailData.value = { ...row, zentaoBug: (zenData.bugs || []).find(b => String(b.id) === String(bugId)) || null }
+  } catch {}
+  detailLoading.value = false
+}
+
 onUnmounted(() => clearInterval(pollTimer))
 </script>
 

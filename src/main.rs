@@ -207,7 +207,143 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Save updated scores
+            // Capture scores BEFORE update for comparison
+            let scores_before = optimizer.scores.clone();
             optimizer.save(scores_path)?;
+
+            // ── Capture git history from his-repo ──
+            let his_repo = "/root/.openclaw/workspace/his-repo";
+            let git_log: Vec<serde_json::Value> = std::process::Command::new("git")
+                .args(["log", "--oneline", "-20", "--format=%H|%h|%s|%ai|%an"])
+                .current_dir(his_repo)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).lines()
+                    .filter_map(|line| {
+                        let parts: Vec<&str> = line.splitn(5, '|').collect();
+                        if parts.len() >= 4 {
+                            Some(serde_json::json!({
+                                "hash": parts[0],
+                                "short": parts[1],
+                                "message": parts[2],
+                                "date": parts[3],
+                                "author": parts.get(4).unwrap_or(&""),
+                            }))
+                        } else { None }
+                    }).collect())
+                .unwrap_or_default();
+
+            // Git diff stats (last 10 commits)
+            let git_diff_stat: Vec<serde_json::Value> = std::process::Command::new("git")
+                .args(["log", "--oneline", "-10", "--numstat", "--format="])
+                .current_dir(his_repo)
+                .output()
+                .map(|o| {
+                    let text = String::from_utf8_lossy(&o.stdout);
+                    let mut commits = Vec::new();
+                    let mut current_files = Vec::new();
+                    let mut current_insertions = 0i64;
+                    let mut current_deletions = 0i64;
+                    for line in text.lines() {
+                        if line.is_empty() && !current_files.is_empty() {
+                            commits.push(serde_json::json!({
+                                "files_changed": current_files.len(),
+                                "insertions": current_insertions,
+                                "deletions": current_deletions,
+                                "files": current_files.iter().take(10).cloned().collect::<Vec<_>>(),
+                            }));
+                            current_files.clear();
+                            current_insertions = 0;
+                            current_deletions = 0;
+                        } else if !line.is_empty() {
+                            let parts: Vec<&str> = line.split("\t").collect();
+                            if parts.len() >= 3 {
+                                current_insertions += parts[0].parse::<i64>().unwrap_or(0);
+                                current_deletions += parts[1].parse::<i64>().unwrap_or(0);
+                                current_files.push(parts[2].to_string());
+                            }
+                        }
+                    }
+                    if !current_files.is_empty() {
+                        commits.push(serde_json::json!({
+                            "files_changed": current_files.len(),
+                            "insertions": current_insertions,
+                            "deletions": current_deletions,
+                            "files": current_files,
+                        }));
+                    }
+                    commits
+                })
+                .unwrap_or_default();
+
+            // Agentforge-rs own recent commits
+            let framework_commits: Vec<serde_json::Value> = std::process::Command::new("git")
+                .args(["log", "--oneline", "-10", "--format=%h|%s|%ai"])
+                .current_dir("/root/agentforge-rs")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).lines()
+                    .filter_map(|line| {
+                        let parts: Vec<&str> = line.splitn(3, '|').collect();
+                        if parts.len() >= 2 {
+                            Some(serde_json::json!({
+                                "short": parts[0],
+                                "message": parts[1],
+                                "date": parts.get(2).unwrap_or(&""),
+                            }))
+                        } else { None }
+                    }).collect())
+                .unwrap_or_default();
+
+            // Score comparison: before vs after
+            let score_changes: Vec<serde_json::Value> = optimizer.scores.iter().map(|(id, after)| {
+                let before = scores_before.get(id);
+                let before_rate = before.map(|b| b.success_rate).unwrap_or(0.0);
+                let before_score = before.map(|b| b.overall_score).unwrap_or(0.0);
+                serde_json::json!({
+                    "agent": id,
+                    "success_rate_before": before_rate,
+                    "success_rate_after": after.success_rate,
+                    "success_rate_delta": after.success_rate - before_rate,
+                    "overall_score_before": before_score,
+                    "overall_score_after": after.overall_score,
+                    "overall_score_delta": after.overall_score - before_score,
+                    "avg_duration_s": after.avg_duration_s,
+                })
+            }).collect::<Vec<_>>();
+
+            // ── Write optimization log ──
+            let log_path = "/var/lib/agentforge/l5_optimization_log.json";
+            let mut log_entries: Vec<serde_json::Value> = if let Ok(data) = std::fs::read_to_string(log_path) {
+                serde_json::from_str(&data).unwrap_or_default()
+            } else { vec![] };
+
+            let entry = serde_json::json!({
+                "timestamp": chrono::Local::now().to_rfc3339(),
+                "actions_count": actions.len(),
+                "actions": actions.iter().map(|a| serde_json::json!({
+                    "type": a.action_type,
+                    "target": a.target_agent,
+                    "reason": a.reason,
+                    "change": a.change,
+                    "confidence": a.confidence,
+                })).collect::<Vec<_>>(),
+                "scores_snapshot": report.agent_metrics.iter().map(|am| serde_json::json!({
+                    "agent": am.agent_id,
+                    "success_rate": am.success_rate,
+                    "avg_duration_s": am.avg_duration_s,
+                    "total_fixes": am.total_fixes,
+                })).collect::<Vec<_>>(),
+                "score_changes": score_changes,
+                "git_commits": git_log,
+                "git_diff_stats": git_diff_stat,
+                "framework_commits": framework_commits,
+            });
+            log_entries.push(entry);
+            // Keep last 50 entries (larger now with git data)
+            if log_entries.len() > 50 {
+                log_entries = log_entries[log_entries.len()-50..].to_vec();
+            }
+            let _ = std::fs::write(log_path, serde_json::to_string_pretty(&log_entries).unwrap_or_default());
+
             println!("
 ✅ 分数已更新: {}", scores_path);
         }

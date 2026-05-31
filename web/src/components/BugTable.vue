@@ -26,6 +26,11 @@
           <span v-else style="color:#475569">-</span>
         </template>
       </el-table-column>
+      <el-table-column label="操作" width="80" fixed="right">
+        <template #default="{ row }">
+          <el-button v-if="onEnqueue" size="small" type="primary" :icon="Plus" circle @click="onEnqueue(row.id)" title="入列修复" />
+        </template>
+      </el-table-column>
     </el-table>
     <div style="display:flex;justify-content:center;margin-top:12px" v-if="filtered.length > pageSize">
       <el-pagination v-model:current-page="page" :page-size="pageSize" :total="filtered.length" layout="prev, pager, next" background small />
@@ -34,10 +39,11 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import { Link } from '@element-plus/icons-vue'
+import { ref, computed, inject } from 'vue'
+import { Link, Plus } from '@element-plus/icons-vue'
 
 const props = defineProps({ bugs: { type: Array, default: () => [] } })
+const onEnqueue = inject('onEnqueue', null)
 const search = ref('')
 const page = ref(1)
 const pageSize = 20

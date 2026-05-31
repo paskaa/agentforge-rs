@@ -1,6 +1,6 @@
 //! Fix trajectory — saves fix history to JSON index for panel display.
 
-use chrono::Utc;
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
@@ -32,7 +32,7 @@ pub fn save_trajectory(
     stderr: &str,
     fix_summary: &str,
 ) -> anyhow::Result<()> {
-    let ts = Utc::now();
+    let ts = Local::now();
     let date_str = ts.format("%Y%m%d-%H%M%S").to_string();
     let status = if success { "OK" } else { "FAIL" };
     let run_dir_name = format!("{}_{}_{}", date_str, method, status);

@@ -1,6 +1,6 @@
 <template>
   <div>
-    <el-table :data="fixes" stripe style="width:100%" max-height="60vh">
+    <el-table :data="fixes" stripe style="width:100%" max-height="60vh" :default-sort="{ prop: 'ts', order: 'descending' }">
       <el-table-column prop="bug" label="Bug" width="100">
         <template #default="{ row }"><span style="font-family:monospace;color:#60a5fa">#{{ row.bug }}</span></template>
       </el-table-column>
@@ -11,7 +11,7 @@
         </template>
       </el-table-column>
       <el-table-column prop="dur" label="耗时" width="100" />
-      <el-table-column prop="ts" label="时间">
+      <el-table-column prop="ts" label="时间" sortable>
         <template #default="{ row }"><span style="color:#64748b;font-size:12px">{{ row.ts }}</span></template>
       </el-table-column>
     </el-table>

@@ -3,7 +3,7 @@
 use axum::{
     extract::{State, WebSocketUpgrade},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -33,12 +33,15 @@ struct ZentaoStats {
     unresolved: i64,
     active: i64,
     total: i64,
+    fixed_today: i64,
     last_sync: String,
     #[serde(default)]
     bugs: Vec<ZentaoBug>,
+    #[serde(default)]
+    today_fixed: Vec<ZentaoBug>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 struct ZentaoBug {
     id: i64,
     title: String,
@@ -46,6 +49,8 @@ struct ZentaoBug {
     assigned_to: String,
     severity: String,
     url: String,
+    #[serde(default)]
+    resolved_date: String,
 }
 
 #[derive(Serialize, Default)]
@@ -105,14 +110,25 @@ fn locked(id: &str) -> bool {
 }
 
 fn current_bug_for(id: &str) -> String {
-    std::process::Command::new("redis-cli")
-        .args(["-p", "16379", "get", &format!("codex_lock:{}", id)])
+    // Try Redis key first (set by executor when processing)
+    let output = std::process::Command::new("redis-cli")
+        .args(["-p", "16379", "get", &format!("current_bug:{}", id)])
         .output()
-        .map(|o| {
-            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if v.is_empty() || v == "(nil)" { String::new() } else { v }
-        })
-        .unwrap_or_default()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if !output.is_empty() && output != "(nil)" {
+        return output;
+    }
+    // Fallback to traces DB
+    let db_path = "/var/lib/agentforge/traces.db";
+    let output = std::process::Command::new("sqlite3")
+        .args([db_path, &format!(
+            "SELECT task_id FROM traces WHERE agent_id='{}' AND event='fix_start' AND task_id IS NOT NULL AND task_id != '?' ORDER BY ts DESC LIMIT 1", id
+        )])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    output
 }
 
 fn redis_queue_len(queue: &str) -> i64 {
@@ -135,13 +151,23 @@ fn redis_queue_items(queue: &str, limit: usize) -> Vec<QueueItem> {
             let mut i = 0;
             while i < lines.len() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(lines[i]) {
-                    let bug_id = v.get("message").and_then(|m| m.as_str())
-                        .and_then(|m| m.strip_prefix("请修复 Bug #"))
-                        .and_then(|m| m.split('：').next())
-                        .unwrap_or("?").to_string();
+                    // Support both {"bug_id":"Bug#630",...} and {"message":"请修复 Bug #630:...",...}
+                    let bug_id = v.get("bug_id").and_then(|b| b.as_str())
+                        .map(|b| b.trim_start_matches("Bug#").to_string())
+                        .or_else(|| v.get("message").and_then(|m| m.as_str())
+                            .and_then(|m| m.strip_prefix("请修复 Bug #"))
+                            .and_then(|m| {
+                                // Split on Chinese colon or regular colon
+                                if let Some(pos) = m.find('：') { Some(&m[..pos]) }
+                                else if let Some(pos) = m.find(':') { Some(&m[..pos]) }
+                                else { Some(m) }
+                            })
+                            .map(|m| m.trim().to_string()))
+                        .unwrap_or("?".to_string());
                     let agent = v.get("agent_id").and_then(|a| a.as_str()).unwrap_or("?").to_string();
                     let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("pipeline").to_string();
-                    items.push(QueueItem { bug_id, agent, source, queued_at: String::new() });
+                    let queued_at = v.get("queued_at").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    items.push(QueueItem { bug_id, agent, source, queued_at });
                 }
                 i += 1;
             }
@@ -206,7 +232,7 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     // Stats
     if let Some(ref pool) = s.pool {
         // 今日活跃 Bug 数（fix_start）
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let today_pattern = format!("{}%", today);
         if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traces WHERE event = 'fix_start' AND ts LIKE ?1")
             .bind(&today_pattern).fetch_one(pool).await { r.stats.total = v; }
@@ -219,11 +245,11 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         r.stats.fixed_today = ok;
         r.stats.rate = if tot > 0 { format!("{:.0}%", ok as f64 / tot as f64 * 100.0) } else { "N/A".into() };
 
-        if let Ok(rows) = sqlx::query_as::<_, (String,String,String,f64,String)>(
+        if let Ok(rows) = sqlx::query_as::<_, (String,String,String,i64,String)>(
             "SELECT COALESCE(task_id,'?'), agent_id, COALESCE(status,'?'), COALESCE(duration_ms,0), COALESCE(ts,'') FROM traces WHERE event = 'fix_done' ORDER BY ts DESC LIMIT 20"
         ).fetch_all(pool).await {
             for (bid,aid,st,dur,ts) in rows {
-                r.recent.push(FixRow { bug: bid.replace("Bug#",""), agent: aid, ok: st=="ok", dur: format!("{:.0}s",dur/1000.0), ts });
+                r.recent.push(FixRow { bug: bid.replace("Bug#",""), agent: aid, ok: st=="ok", dur: format!("{:.0}s",dur as f64/1000.0), ts });
             }
         }
     }
@@ -275,6 +301,51 @@ fn normalize_scores_value(raw: &serde_json::Value) -> Vec<serde_json::Value> {
 
 #[derive(Serialize)]
 struct TraceRow { ts: String, event: String, task_id: String, message: String, status: String, duration_ms: i64 }
+
+
+async fn agent_traces_realtime(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(ref pool) = s.pool {
+        let rows: Vec<(String,String,String,String,String,i64)> = sqlx::query_as(
+            "SELECT COALESCE(ts,''), event, COALESCE(task_id,''), COALESCE(message,''), COALESCE(status,''), COALESCE(duration_ms,0) FROM traces WHERE agent_id = ?1 ORDER BY ts DESC LIMIT 50"
+        ).bind(&agent_id).fetch_all(pool).await.unwrap_or_default();
+        let traces: Vec<serde_json::Value> = rows.iter().map(|(ts,ev,task,msg,st,dur)| {
+            serde_json::json!({"ts":ts,"event":ev,"task_id":task,"message":msg,"status":st,"duration_ms":dur})
+        }).collect();
+        Json(serde_json::json!({"traces": traces}))
+    } else {
+        Json(serde_json::json!({"traces": []}))
+    }
+}
+
+async fn agent_queue_api(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let queue = format!("agent-work-queue:fix:{}", agent_id);
+    let len = redis_queue_len(&queue);
+    let mut items = if len > 0 { redis_queue_items(&queue, 20) } else { vec![] };
+
+    // Check if agent is currently processing a bug
+    let current_bug = current_bug_for(&agent_id);
+    let is_locked = !current_bug.is_empty();
+    if !current_bug.is_empty() {
+        // Check if this bug is already in the queue items
+        let already_queued = items.iter().any(|i| i.bug_id == current_bug.replace("Bug#",""));
+        if !already_queued {
+            items.insert(0, QueueItem {
+                bug_id: current_bug.replace("Bug#",""),
+                agent: agent_id.clone(),
+                source: "processing".into(),
+                queued_at: "正在处理".into(),
+            });
+        }
+    }
+
+    Json(serde_json::json!({"agent": agent_id, "queue_len": items.len() as i64, "items": items, "processing": is_locked, "current_bug": current_bug}))
+}
 
 async fn agent_traces(
     State(s): State<Arc<AppState>>,
@@ -375,9 +446,10 @@ async fn fetch_zentao_stats(_pool: &Option<SqlitePool>) -> ZentaoStats {
     }
 
     let total = all_bugs.len() as i64;
-    let mut unclosed = 0i64;  // 非 closed 的全部
-    let mut unresolved = 0i64; // active = 未解决
+    let mut unclosed = 0i64;
+    let mut unresolved = 0i64;
     let mut active = 0i64;
+    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     for bug in &all_bugs {
         let status = bug.get("status").and_then(|s| s.as_str()).unwrap_or("");
@@ -385,26 +457,50 @@ async fn fetch_zentao_stats(_pool: &Option<SqlitePool>) -> ZentaoStats {
         if status == "active" { active += 1; unresolved += 1; }
     }
 
+    let mut today_fixed: Vec<ZentaoBug> = Vec::new();
     let bugs: Vec<ZentaoBug> = all_bugs.iter().map(|b| {
         let assignee = b.get("assignedTo").and_then(|a| {
             if a.is_object() { a.get("name").or(a.get("account")).and_then(|v| v.as_str()).map(String::from) }
             else { a.as_str().map(String::from) }
         }).unwrap_or_default();
         let bug_id = b.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let resolved_date = b.get("resolvedDate").and_then(|v| v.as_str()).unwrap_or("").to_string();
         ZentaoBug {
             id: bug_id,
             title: b.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             status: b.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             assigned_to: assignee,
-            severity: b.get("severity").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            severity: {
+                    let s = b.get("severity");
+                    match s.and_then(|v| v.as_i64()) {
+                        Some(1) => "致命".into(),
+                        Some(2) => "严重".into(),
+                        Some(3) => "重要".into(),
+                        Some(4) => "一般".into(),
+                        Some(5) => "轻微".into(),
+                        Some(n) => format!("{}", n),
+                        None => s.and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    }
+                },
             url: format!("https://zentao.gentronhealth.com/index.php?m=bug&f=view&bugID={}", bug_id),
+            resolved_date: resolved_date.clone(),
         }
     }).collect();
 
+    // Count today's resolved bugs
+    for b in &bugs {
+        if !b.resolved_date.is_empty() && b.resolved_date.starts_with(&today_str) && b.status == "resolved" {
+            today_fixed.push((*b).clone());
+        }
+    }
+
+    let fixed_today = today_fixed.len() as i64;
+
     ZentaoStats {
-        unclosed, unresolved, active, total,
-        last_sync: chrono::Utc::now().format("%H:%M:%S").to_string(),
+        unclosed, unresolved, active, total, fixed_today,
+        last_sync: chrono::Local::now().format("%H:%M:%S").to_string(),
         bugs,
+        today_fixed,
     }
 }
 
@@ -419,8 +515,23 @@ async fn queues_api() -> impl IntoResponse {
     for id in &agent_ids {
         let queue = format!("agent-work-queue:fix:{}", id);
         let len = redis_queue_len(&queue);
-        let items = if len > 0 { redis_queue_items(&queue, 10) } else { vec![] };
-        queues.push(QueueApiItem { agent: id.to_string(), queue_len: len, items });
+        let mut items = if len > 0 { redis_queue_items(&queue, 10) } else { vec![] };
+
+        // Include current processing bug from Redis
+        let current_bug = current_bug_for(id);
+        if !current_bug.is_empty() {
+            let already_queued = items.iter().any(|i| i.bug_id == current_bug.replace("Bug#",""));
+            if !already_queued {
+                items.insert(0, QueueItem {
+                    bug_id: current_bug.replace("Bug#",""),
+                    agent: id.to_string(),
+                    source: "processing".into(),
+                    queued_at: "正在处理".into(),
+                });
+            }
+        }
+
+        queues.push(QueueApiItem { agent: id.to_string(), queue_len: items.len() as i64, items });
     }
     Json(queues)
 }
@@ -458,6 +569,38 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, s: Arc<AppState>) {
     while let Some(Ok(_)) = receiver.next().await {}
 }
 
+// ── Redis subscriber — forward trace events to WebSocket ──
+
+async fn redis_trace_subscriber(tx: broadcast::Sender<String>) {
+    let client = match redis::Client::open("redis://127.0.0.1:16379") {
+        Ok(c) => c,
+        Err(e) => { tracing::warn!("[ws] Redis connect failed: {}", e); return; }
+    };
+    let mut pubsub = match client.get_async_connection().await {
+        Ok(c) => c.into_pubsub(),
+        Err(e) => { tracing::warn!("[ws] Redis pubsub failed: {}", e); return; }
+    };
+    if let Err(e) = pubsub.subscribe("agentforge:traces").await {
+        tracing::warn!("[ws] Subscribe failed: {}", e);
+        return;
+    }
+    tracing::info!("[ws] Subscribed to agentforge:traces channel");
+    loop {
+        match futures_util::StreamExt::next(&mut pubsub.on_message()).await {
+            Some(msg) => {
+                if let Ok(payload) = msg.get_payload::<String>() {
+                    let _ = tx.send(payload);
+                }
+            }
+            None => {
+                tracing::warn!("[ws] Redis stream ended, reconnecting...");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                break;
+            }
+        }
+    }
+}
+
 // ── Background ticker — push status every 10s ──
 
 async fn status_ticker(tx: broadcast::Sender<String>) {
@@ -472,7 +615,7 @@ async fn status_ticker(tx: broadcast::Sender<String>) {
         }
         let event = serde_json::json!({
             "event": "tick",
-            "data": { "agents": agents, "queue": queue_total, "ts": chrono::Utc::now().format("%H:%M:%S").to_string() }
+            "data": { "agents": agents, "queue": queue_total, "ts": chrono::Local::now().format("%H:%M:%S").to_string() }
         });
         let _ = tx.send(event.to_string());
     }
@@ -490,10 +633,143 @@ pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Re
         zentao_cache: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
+
+async fn l5_history_api() -> impl IntoResponse {
+    let path = "/var/lib/agentforge/l5_optimization_log.json";
+    let data = std::fs::read_to_string(path).unwrap_or_else(|_| "[]".into());
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+    Json(serde_json::json!({"history": entries}))
+}
+
+async fn enqueue_bug_api(
+    State(s): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let bug_id = payload.get("bug_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    if bug_id == 0 {
+        return Json(serde_json::json!({"ok": false, "error": "missing bug_id"}));
+    }
+
+    // Find an available agent (least queued)
+    let agent_ids = ["guanyu", "zhaoyun", "xunyu", "zhangfei", "huatuo", "chenlin", "liubei", "zhugeliang"];
+    let mut best_agent = "guanyu";
+    let mut min_queue = i64::MAX;
+    for id in &agent_ids {
+        let queue = format!("agent-work-queue:fix:{}", id);
+        let len = redis_queue_len(&queue);
+        if len < min_queue {
+            min_queue = len;
+            best_agent = id;
+        }
+    }
+
+    let queue = format!("agent-work-queue:fix:{}", best_agent);
+    let task = serde_json::json!({
+        "agent_id": best_agent,
+        "message": format!("请修复 Bug #{}: web_ui 手动入列", bug_id),
+        "source": "web_ui",
+        "sender_id": "web_admin",
+        "msg_id": format!("web_{}", chrono::Local::now().timestamp()),
+        "timestamp": chrono::Local::now().to_rfc3339(),
+    });
+
+    // Push to Redis
+    let out = std::process::Command::new("redis-cli")
+        .args(["-p", "16379", "rpush", &queue, &task.to_string()])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("error: {}", e));
+
+    if out.parse::<i64>().unwrap_or(0) > 0 {
+        Json(serde_json::json!({"ok": true, "agent": best_agent, "queue": queue}))
+    } else {
+        Json(serde_json::json!({"ok": false, "error": format!("redis error: {}", out)}))
+    }
+}
+
+
+async fn batch_enqueue_api(
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let bug_ids: Vec<i64> = payload.get("bug_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default();
+
+    if bug_ids.is_empty() {
+        return Json(serde_json::json!({"ok": false, "error": "no bug_ids", "enqueued": 0}));
+    }
+
+    let agent_ids = ["guanyu", "zhaoyun", "xunyu", "zhangfei", "huatuo", "chenlin", "liubei", "zhugeliang"];
+    let mut enqueued = 0i64;
+    let mut errors = Vec::new();
+
+    for bug_id in &bug_ids {
+        // Round-robin to least queued agent
+        let mut best_agent = "guanyu";
+        let mut min_queue = i64::MAX;
+        for id in &agent_ids {
+            let queue = format!("agent-work-queue:fix:{}", id);
+            let len = redis_queue_len(&queue);
+            if len < min_queue {
+                min_queue = len;
+                best_agent = id;
+            }
+        }
+
+        let queue = format!("agent-work-queue:fix:{}", best_agent);
+        let task = serde_json::json!({
+            "agent_id": best_agent,
+            "message": format!("请修复 Bug #{}: batch enqueue", bug_id),
+            "source": "web_ui",
+            "sender_id": "web_admin",
+            "msg_id": format!("web_batch_{}_{}", bug_id, chrono::Local::now().timestamp()),
+            "timestamp": chrono::Local::now().to_rfc3339(),
+        });
+
+        let out = std::process::Command::new("redis-cli")
+            .args(["-p", "16379", "rpush", &queue, &task.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|e| format!("error: {}", e));
+
+        if out.parse::<i64>().unwrap_or(0) > 0 {
+            enqueued += 1;
+        } else {
+            errors.push(format!("Bug#{}: {}", bug_id, out));
+        }
+    }
+
+    Json(serde_json::json!({
+        "ok": errors.is_empty(),
+        "enqueued": enqueued,
+        "total": bug_ids.len(),
+        "errors": errors,
+    }))
+}
+
+
+
+async fn bug_traces_api(
+    axum::extract::Path(bug_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let db_path = "/var/lib/agentforge/traces.db";
+    let output = std::process::Command::new("sqlite3")
+        .args([db_path, "-json", &format!(
+            "SELECT ts, agent_id, event, COALESCE(task_id,'') as task_id, COALESCE(message,'') as message, COALESCE(status,'') as status, COALESCE(duration_ms,0) as duration_ms FROM traces WHERE task_id LIKE '%{}%' ORDER BY ts ASC", bug_id
+        )])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let traces: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap_or_default();
+    Json(serde_json::json!({"bug_id": bug_id, "traces": traces, "count": traces.len()}))
+}
+
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/root/agentforge-rs/static".into());
 
     // Start background ticker
-    tokio::spawn(status_ticker(tx));
+    tokio::spawn(status_ticker(tx.clone()));
+    tokio::spawn(redis_trace_subscriber(tx));
 
     let app = Router::new()
         .route("/api/health", get(health))
@@ -501,9 +777,15 @@ pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Re
         .route("/api/analytics", get(analytics_api))
         .route("/api/scores", get(scores_api))
         .route("/api/agent/:id/traces", get(agent_traces))
+        .route("/api/agent/:id/traces/rt", get(agent_traces_realtime))
+        .route("/api/agent/:id/queue", get(agent_queue_api))
+        .route("/api/bugs/:id/traces", get(bug_traces_api))
         .route("/api/queues", get(queues_api))
         .route("/api/zentao/stats", get(zentao_stats_api))
         .route("/api/constraints", get(constraints_api))
+        .route("/api/l5/history", get(l5_history_api))
+        .route("/api/bugs/enqueue", axum::routing::post(enqueue_bug_api))
+        .route("/api/bugs/batch-enqueue", axum::routing::post(batch_enqueue_api))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
         .layer(CorsLayer::permissive())

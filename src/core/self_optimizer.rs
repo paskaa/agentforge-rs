@@ -183,7 +183,7 @@ impl SelfOptimizer {
         }
 
         // 2. Common failure patterns → targeted constraints
-        for fp in failure_patterns.iter().take(5) {
+        for fp in failure_patterns.iter().filter(|p| p.error_category != "其他错误").take(5) {
             if fp.count >= 3 {
                 for agent in &fp.agents {
                     let constraint = self.suggest_constraint_for_error(&fp.error_category);
@@ -264,59 +264,57 @@ impl SelfOptimizer {
 
     /// Suggest prompt enhancement based on failure patterns.
     fn suggest_prompt_boost(&self, agent_id: &str, patterns: &[super::analytics::FailurePattern]) -> String {
-        // Filter to only real error categories (not git noise)
-        let relevant: Vec<&str> = patterns.iter()
-            .filter(|p| p.agents.contains(&agent_id.to_string()))
-            .map(|p| p.error_category.as_str())
-            .filter(|cat| !cat.is_empty() && !cat.starts_with("HEAD is now at")
-                && !cat.starts_with("attempt=") && !cat.contains("Creating isolate")
-                && !cat.contains("Claude Code") && cat.len() <= 50)
+        // Get patterns relevant to this agent
+        let relevant: Vec<(&str, i64)> = patterns.iter()
+            .filter(|p| p.agents.contains(&agent_id.to_string()) && p.count >= 1 && p.error_category != "其他错误")
+            .map(|p| (p.error_category.as_str(), p.count))
             .collect();
 
         if relevant.is_empty() {
-            return format!("建议 {} 增加通用约束：修复前先读 AGENTS.md，修复后验证编译", agent_id);
+            return format!("建议 {} 修复后运行编译/语法检查验证", agent_id);
         }
 
-        let hints: Vec<String> = relevant.iter().take(5).map(|cat| {
-            if cat.contains("编译") || cat.contains("compile") {
-                "修改后必须运行编译检查".into()
-            } else if cat.contains("SQL") || cat.contains("sql") {
-                "SQL 修改后必须用 EXPLAIN 验证".into()
-            } else if cat.contains("类型") || cat.contains("type") {
-                "注意 TypeScript/Java 类型匹配".into()
-            } else if cat.contains("导入") || cat.contains("import") {
-                "检查 import 路径和包依赖".into()
-            } else {
-                format!("注意「{}」相关问题", cat.chars().take(15).collect::<String>())
+        let hints: Vec<String> = relevant.iter().take(3).map(|(cat, count)| {
+            match *cat {
+                "编译失败" => format!("编译失败 {} 次 → 修改后必须运行 mvn compile / cargo check", count),
+                "SQL/数据库错误" => format!("SQL 错误 {} 次 → 修改 Mapper 后用 EXPLAIN 验证", count),
+                "空指针/空值异常" => format!("空指针 {} 次 → 增加 null 检查和 Optional 处理", count),
+                "类型不匹配" => format!("类型错误 {} 次 → 注意泛型和类型转换", count),
+                "Git 合并冲突" => format!("合并冲突 {} 次 → 修复前先 git pull --rebase", count),
+                "API/接口错误" => format!("API 错误 {} 次 → 检查请求参数和响应格式", count),
+                "前端组件错误" => format!("前端错误 {} 次 → 检查 Vue 响应式和生命周期", count),
+                "权限/鉴权错误" => format!("权限错误 {} 次 → 检查鉴权注解和拦截器配置", count),
+                "文件/路径错误" => format!("文件错误 {} 次 → 确认文件路径和权限", count),
+                "请求超时" => format!("超时 {} 次 → 优化查询性能或增加超时时间", count),
+                "修复逻辑错误" => format!("修复逻辑错误 {} 次 → 修复前先分析全链路数据流", count),
+                _ => format!("「{}」失败 {} 次 → 增加针对性检查", cat, count),
             }
         }).collect();
 
         format!(
-            "基于 {} 种失败模式分析，建议 {} 增加约束：\n- {}",
-            relevant.len(), agent_id, hints.join("\n- ")
+            "基于 {} 种失败模式分析：
+- {}",
+            relevant.len(), hints.join("
+- ")
         )
     }
 
     /// Suggest constraint for a specific error pattern.
     fn suggest_constraint_for_error(&self, error_category: &str) -> String {
-        // Skip noise patterns that aren't real error categories
-        if error_category.is_empty() || error_category.starts_with("HEAD is now at")
-            || error_category.starts_with("attempt=") || error_category.contains("Creating isolate")
-            || error_category.contains("Claude Code") || error_category.len() > 50 {
-            return "修复前必须先读 AGENTS.md 了解项目规范，修复后运行 cargo check / mvn compile 验证".into();
-        }
-        if error_category.contains("编译") || error_category.contains("compile") {
-            "修改后必须运行 cargo check / mvn compile / npm run build 确认编译通过".into()
-        } else if error_category.contains("SQL") || error_category.contains("mapper") {
-            "修改 Mapper XML 后必须用 EXPLAIN 验证查询计划".into()
-        } else if error_category.contains("字段") || error_category.contains("column") {
-            "涉及数据库字段变更时，必须走通全链路 6 环".into()
-        } else if error_category.contains("权限") || error_category.contains("auth") {
-            "注意权限检查和鉴权逻辑".into()
-        } else if error_category.contains("类型") || error_category.contains("type") {
-            "注意 TypeScript/Java 类型匹配，修改后运行类型检查".into()
-        } else {
-            format!("针对「{}」错误增加专项检查", error_category.chars().take(20).collect::<String>())
+        match error_category {
+            "编译失败" => "修改代码后必须运行 mvn compile / cargo check 确认编译通过，禁止提交编译不通过的代码".into(),
+            "SQL/数据库错误" => "修改 Mapper/SQL 后必须用 EXPLAIN 验证查询计划，涉及字段变更必须走全链路 6 环".into(),
+            "空指针/空值异常" => "增加 null 检查，使用 Optional/?.unwrap_or_default() 防御性编程".into(),
+            "类型不匹配" => "注意泛型和类型转换，修改后运行类型检查（vue-tsc / mvn compile）".into(),
+            "Git 合并冲突" => "修复前先 git pull --rebase 同步最新代码，解决冲突后再提交".into(),
+            "API/接口错误" => "检查请求参数校验和响应格式，确保前后端字段名一致".into(),
+            "前端组件错误" => "检查 Vue 响应式数据绑定和生命周期钩子，确保组件更新触发正确".into(),
+            "权限/鉴权错误" => "检查 @PreAuthorize 注解和 SecurityConfig 配置，确保接口鉴权正确".into(),
+            "文件/路径错误" => "确认文件路径存在且有读写权限，使用相对路径避免硬编码".into(),
+            "请求超时" => "优化查询性能（加索引/分页），或调整超时配置".into(),
+            "修复逻辑错误" => "修复前分析全链路数据流（录入→保存→查询→修改→删除→关联），确保逻辑完整".into(),
+            "其他错误" => "修复后运行完整测试套件验证".into(),
+            _ => format!("针对「{}」错误增加专项检查", error_category.chars().take(20).collect::<String>()),
         }
     }
 

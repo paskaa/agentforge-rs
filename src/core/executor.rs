@@ -212,8 +212,8 @@ impl AgentExecutor {
                 "sender_id": "system",
                 "chat_id": "",
                 "is_dm": "true",
-                "msg_id": format!("retry-{}-{}-{}", bid, self.agent_id, chrono::Utc::now().timestamp()),
-                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "msg_id": format!("retry-{}-{}-{}", bid, self.agent_id, chrono::Local::now().timestamp()),
+                "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
             });
             let queue = format!("agent-work-queue:fix:{}", self.agent_id);
             let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, task.to_string()).await;
@@ -308,10 +308,29 @@ impl AgentExecutor {
         self.traces.log(&self.agent_id, "pm_routed", None, Some(&reply), None, None, None, Some("ok")).await;
     }
 
+
+    /// Publish trace event to Redis channel for WebSocket broadcasting.
+    async fn publish_trace(&self, agent_id: &str, event: &str, task_id: &str, message: &str, status: &str, duration_ms: i64) {
+        let trace_event = serde_json::json!({
+            "event": "trace",
+            "data": {
+                "ts": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                "agent_id": agent_id,
+                "event": event,
+                "task_id": task_id,
+                "message": message.chars().take(200).collect::<String>(),
+                "status": status,
+                "duration_ms": duration_ms,
+            }
+        });
+        let _: redis::RedisResult<()> = self.redis.clone().publish("agentforge:traces", trace_event.to_string()).await;
+    }
+
     async fn handle_fix_task(&self, msg: &str) {
         let bug_id = pipeline::parse_bugs_from_message(msg).first().map(|(b,_)| b.clone()).unwrap_or_default();
         if bug_id.is_empty() { return; }
         self.traces.log(&self.agent_id, "fix_start", Some(&format!("Bug#{}", bug_id)), Some(msg), Some("codex"), None, None, Some("pending")).await;
+        self.publish_trace(&self.agent_id, "fix_start", &format!("Bug#{}", bug_id), msg, "pending", 0).await;
         // Try to acquire per-agent lock
         let lock_key = format!("codex_lock:{}", self.agent_id);
         let lock_sync = Arc::clone(&self.redis_sync); let agent = self.agent_id.clone();
@@ -327,7 +346,12 @@ impl AgentExecutor {
             tracing::warn!("[{}] Failed to acquire lock for Bug #{} — skipping", self.agent_id, bug_id);
             return;
         }
-        
+
+        // Set current_bug in Redis for dashboard display
+        let current_bug_key = format!("current_bug:{}", self.agent_id);
+        let current_bug_val = format!("Bug#{}", bug_id);
+        let _: redis::RedisResult<()> = self.redis.clone().set(&current_bug_key, &current_bug_val).await;
+
         let (an, bid, m, tr) = (self.agent_id.clone(), bug_id.clone(), msg.to_string(), Arc::clone(&self.traces));
         let feishu = self.feishu.clone();
         let mut redis_clone = self.redis.clone();
@@ -456,8 +480,8 @@ impl AgentExecutor {
                         "source": "pipeline_analyze",
                         "sender_id": an,
                         "bug_reporter": reporter,
-                        "msg_id": format!("pipeline-analyze-{}-{}", bid, chrono::Utc::now().timestamp()),
-                        "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        "msg_id": format!("pipeline-analyze-{}-{}", bid, chrono::Local::now().timestamp()),
+                        "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                         "chat_id": "", "is_dm": "true",
                     });
                     let _: redis::RedisResult<i64> = redis_clone.rpush("agent-work-queue:fix:zhangfei", pipe_task.to_string()).await;
@@ -532,7 +556,7 @@ impl AgentExecutor {
             let _: redis::RedisResult<()> = self.redis.clone().set_ex(format!("test_doc:{}", bid), &test_doc, 86400).await;
 
             // 通知下一阶段（huatuo 验收 + chenlin 归档）
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+            let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
             let next_msg = format!("Bug #{} 测试完成，请验收。提出人: {}。", bid, rep);
             for next_agent in &["huatuo", "chenlin"] {
                 let pipe_task = serde_json::json!({
@@ -541,7 +565,7 @@ impl AgentExecutor {
                     "source": "pipeline_test_done",
                     "sender_id": "zhangfei",
                     "bug_reporter": &rep,
-                    "msg_id": format!("pipeline-test-done-{}-{}", bid, chrono::Utc::now().timestamp()),
+                    "msg_id": format!("pipeline-test-done-{}-{}", bid, chrono::Local::now().timestamp()),
                     "timestamp": &ts,
                     "chat_id": "", "is_dm": "true",
                 });
@@ -569,8 +593,8 @@ impl AgentExecutor {
                 "message": format!("请重新修复 Bug #{}。回归测试未通过，需继续修改代码直到测试通过。\n测试输出：\n{}", bid, test_output.chars().take(300).collect::<String>()),
                 "source": "pipeline_retry",
                 "sender_id": "zhangfei",
-                "msg_id": format!("pipeline-retry-{}-{}", bid, chrono::Utc::now().timestamp()),
-                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "msg_id": format!("pipeline-retry-{}-{}", bid, chrono::Local::now().timestamp()),
+                "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 "chat_id": "", "is_dm": "true",
             });
             let _: redis::RedisResult<i64> = self.redis.clone().rpush(
@@ -594,7 +618,7 @@ impl AgentExecutor {
 
     async fn handle_chenlin_doc(&self, msg: &str) {
         let bid = pipeline::extract_bug_id(msg);
-        let doc = format!("# Bug #{} 修复文档\n\n**时间**: {}\n\n{}\n\n✅ 测试通过 ✅ 验收通过", bid, chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"), msg.chars().take(300).collect::<String>());
+        let doc = format!("# Bug #{} 修复文档\n\n**时间**: {}\n\n{}\n\n✅ 测试通过 ✅ 验收通过", bid, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg.chars().take(300).collect::<String>());
         let _: redis::RedisResult<()> = self.redis.clone().set_ex(format!("fix_doc:{}", bid), &doc, 30*86400).await;
         let _ = self.feishu.send(&format!("📚 Bug #{} 文档已归档。", bid), None).await;
         self.traces.log("chenlin", "doc_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok")).await;
@@ -766,8 +790,8 @@ impl AgentExecutor {
             "source": next_source,
             "sender_id": "zhugeliang",
             "bug_reporter": reporter,
-            "msg_id": format!("pipeline-routed-{}-{}", bid, chrono::Utc::now().timestamp()),
-            "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "msg_id": format!("pipeline-routed-{}-{}", bid, chrono::Local::now().timestamp()),
+            "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
             "chat_id": "", "is_dm": "true",
         });
         let _: redis::RedisResult<i64> = self.redis.clone().rpush(
@@ -810,8 +834,8 @@ impl AgentExecutor {
                 "source": "pipeline_fix_done",
                 "sender_id": "xunyu",
                 "bug_reporter": reporter,
-                "msg_id": format!("pipeline-fix-{}-{}", bid, chrono::Utc::now().timestamp()),
-                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "msg_id": format!("pipeline-fix-{}-{}", bid, chrono::Local::now().timestamp()),
+                "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 "chat_id": "", "is_dm": "true",
             });
             let _: redis::RedisResult<i64> = self.redis.clone().rpush(
@@ -829,8 +853,8 @@ impl AgentExecutor {
                 "message": rework_msg,
                 "source": "pipeline_retry",
                 "sender_id": "xunyu",
-                "msg_id": format!("pipeline-dbreview-{}-{}", bid, chrono::Utc::now().timestamp()),
-                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "msg_id": format!("pipeline-dbreview-{}-{}", bid, chrono::Local::now().timestamp()),
+                "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 "chat_id": "", "is_dm": "true",
             });
             let _: redis::RedisResult<i64> = self.redis.clone().rpush(
@@ -864,7 +888,7 @@ impl AgentExecutor {
         }
         
         report.push_str(&format!("
-🕐 报告时间: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")));
+🕐 报告时间: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
         
         let _ = self.feishu.send(&report, None).await;
         self.traces.log("liubei", "report_done", None, Some(&report), None, None, None, Some("ok")).await;
