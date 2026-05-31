@@ -99,6 +99,7 @@ const failCount = computed(() => traces.value.filter(t => t.event === 'fix_done'
 const totalFixes = computed(() => successCount.value + failCount.value)
 const successRate = computed(() => totalFixes.value > 0 ? Math.round(successCount.value / totalFixes.value * 100) : 0)
 
+const agentIdMap = { '\u5173\u7fbd':'guanyu','\u8d75\u4e91':'zhaoyun','\u8359\u5f55':'xunyu','\u5f20\u98de':'zhangfei','\u534e\u4f6e':'huatuo','\u9648\u7433':'chenlin','\u5218\u5907':'liubei','\u8bf8\u845b\u4eae':'zhugeliang' }
 const agentData = {
   guanyu: { icon: '⚔️', name: '关羽', role: '后端开发' }, zhaoyun: { icon: '🐉', name: '赵云', role: '前端开发' },
   xunyu: { icon: '📚', name: '荀彧', role: 'DBA' }, zhangfei: { icon: '🔥', name: '张飞', role: '测试' },

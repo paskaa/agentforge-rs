@@ -5,6 +5,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 归一化 agent_id: 中文名 → pinyin ID
+fn normalize_agent_id(id: &str) -> String {
+    match id {
+        "关羽" => "guanyu".into(),
+        "赵云" => "zhaoyun".into(),
+        "荀彧" => "xunyu".into(),
+        "张飞" => "zhangfei".into(),
+        "华佗" => "huatuo".into(),
+        "陈琳" => "chenlin".into(),
+        "刘备" => "liubei".into(),
+        "诸葛亮" => "zhugeliang".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Optimization action — what to change and why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptimizationAction {
@@ -41,11 +56,26 @@ impl SelfOptimizer {
         }
     }
 
-    /// Load scores from JSON file.
+    /// Load scores from JSON file (归一化 agent_id).
     pub fn load(path: &str) -> Self {
         let data = std::fs::read_to_string(path).unwrap_or_default();
-        let scores: HashMap<String, AgentScore> =
+        let raw: HashMap<String, AgentScore> =
             serde_json::from_str(&data).unwrap_or_default();
+        // 归一化并合并
+        let mut scores: HashMap<String, AgentScore> = HashMap::new();
+        for (id, score) in raw {
+            let normalized = normalize_agent_id(&id);
+            tracing::debug!("[SelfOptimizer] load: {} -> {}", id, normalized);
+            let mut score = score;
+            score.agent_id = normalized.clone();
+            if let Some(existing) = scores.get_mut(&normalized) {
+                if score.overall_score > existing.overall_score {
+                    *existing = score;
+                }
+            } else {
+                scores.insert(normalized, score);
+            }
+        }
         // Load extra constraints from separate file
         let extra_path = format!("{}.constraints", path);
         let extra_data = std::fs::read_to_string(&extra_path).unwrap_or_default();
@@ -54,9 +84,22 @@ impl SelfOptimizer {
         Self { scores, extra_constraints }
     }
 
-    /// Save scores to JSON file.
+    /// Save scores to JSON file (强制归一化 key).
     pub fn save(&self, path: &str) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.scores)?;
+        let mut normalized: HashMap<String, AgentScore> = HashMap::new();
+        for (k, v) in &self.scores {
+            let nk = normalize_agent_id(k);
+            let mut v = v.clone();
+            v.agent_id = nk.clone();
+            if let Some(existing) = normalized.get(&nk) {
+                if v.overall_score > existing.overall_score {
+                    normalized.insert(nk, v);
+                }
+            } else {
+                normalized.insert(nk, v);
+            }
+        }
+        let json = serde_json::to_string_pretty(&normalized)?;
         std::fs::write(path, json)?;
         // Also persist extra constraints
         let extra_path = format!("{}.constraints", path);
@@ -72,8 +115,9 @@ impl SelfOptimizer {
         success: bool,
         duration_s: f64,
     ) {
-        let score = self.scores.entry(agent_id.to_string()).or_insert_with(|| AgentScore {
-            agent_id: agent_id.to_string(),
+        let agent_id = normalize_agent_id(agent_id);
+        let score = self.scores.entry(agent_id.clone()).or_insert_with(|| AgentScore {
+            agent_id: agent_id.clone(),
             success_rate: 0.0,
             avg_duration_s: 0.0,
             bug_type_scores: HashMap::new(),

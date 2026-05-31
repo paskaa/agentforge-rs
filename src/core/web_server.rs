@@ -241,8 +241,34 @@ async fn analytics_api(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn scores_api(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    let opt = super::self_optimizer::SelfOptimizer::load(&s.scores_path);
-    Json(serde_json::json!({"scores": opt.scores.values().collect::<Vec<_>>()}))
+    let data = std::fs::read_to_string(&s.scores_path).unwrap_or_else(|_| "{}".into());
+    let raw: serde_json::Value = serde_json::from_str(&data).unwrap_or(serde_json::json!({}));
+    let result = normalize_scores_value(&raw);
+    Json(serde_json::json!({"scores": result}))
+}
+
+fn normalize_scores_value(raw: &serde_json::Value) -> Vec<serde_json::Value> {
+    tracing::debug!("[scores_api] normalize_scores_value called, keys: {:?}", raw.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+    let obj = match raw.as_object() {
+        Some(o) => o,
+        None => return vec![],
+    };
+    let pairs = [
+        ("关羽", "guanyu"), ("赵云", "zhaoyun"),
+        ("荙录", "xunyu"), ("张飞", "zhangfei"),
+        ("华佮", "huatuo"), ("陈琳", "chenlin"),
+        ("刘备", "liubei"), ("诸葛亮", "zhugeliang"),
+    ];
+    let mut merged: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    for (k, v) in obj {
+        let nk = pairs.iter().find(|(cn, _)| *cn == k.as_str()).map(|(_, py)| *py).unwrap_or(k.as_str());
+        let new_score = v.get("overall_score").and_then(|s| s.as_f64()).unwrap_or(0.0);
+        let old_score = merged.get(nk).and_then(|e| e.get("overall_score")).and_then(|s| s.as_f64()).unwrap_or(0.0);
+        if new_score >= old_score {
+            merged.insert(nk.to_string(), v.clone());
+        }
+    }
+    merged.into_values().collect()
 }
 
 // ── Agent traces API ──

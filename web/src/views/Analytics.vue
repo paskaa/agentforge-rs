@@ -172,7 +172,10 @@ const totalConstraints = computed(() => Object.values(constraints.value).reduce(
 const agentIcons = { guanyu:'⚔️', zhaoyun:'🐉', xunyu:'📚', zhangfei:'🔥', huatuo:'💊', chenlin:'📝', liubei:'👑', zhugeliang:'🪶' }
 const agentNames = { guanyu:'关羽', zhaoyun:'赵云', xunyu:'荀彧', zhangfei:'张飞', huatuo:'华佗', chenlin:'陈琳', liubei:'刘备', zhugeliang:'诸葛亮' }
 function agentIcon(id) { return agentIcons[id] || '🤖' }
-function agentName(id) { return agentNames[id] || id }
+function agentName(id) {
+    const map = { '关羽':'guanyu','赵云':'zhaoyun','荙录':'xunyu','张飞':'zhangfei','华佮':'huatuo','陈琳':'chenlin','刘备':'liubei','诸葛亮':'zhugeliang' };
+    return agentNames[map[id] || id] || id;
+}
 function scoreColor(s) {
   if (s >= 60) return '#22c55e'
   if (s >= 40) return '#3b82f6'

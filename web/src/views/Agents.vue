@@ -49,6 +49,7 @@
 import { ref, onMounted } from 'vue'
 
 const scores = ref([])
+const agentIdMap = { '\u5173\u7fbd':'guanyu','\u8d75\u4e91':'zhaoyun','\u8359\u5f55':'xunyu','\u5f20\u98de':'zhangfei','\u534e\u4f6e':'huatuo','\u9648\u7433':'chenlin','\u5218\u5907':'liubei','\u8bf8\u845b\u4eae':'zhugeliang' }
 const agentLabels = { guanyu:'⚔️ 关羽', zhaoyun:'🐉 赵云', xunyu:'📚 荀彧', zhangfei:'🔥 张飞', huatuo:'💊 华佗', chenlin:'📝 陈琳', liubei:'👑 刘备', zhugeliang:'🪶 诸葛亮' }
 
 const agentData = [
