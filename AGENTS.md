@@ -17,7 +17,9 @@
 | 编译检查 | `cargo check` |
 | 运行测试 | `cargo test` |
 | 代码质量 | `cargo clippy` |
-| 启动 Agent | `cargo run -- executor --agent <name>` |
+| 启动 Agent | `agentforge executor --agent <name>` |
+| L4 分析 | `agentforge analytics` / `agentforge report` |
+| L5 优化 | `agentforge optimize` / `agentforge scores` |
 | 查看进度 | `cat .harness/PROGRESS.md` |
 | 更新清单 | `vim .harness/feature_list.json` |
 
@@ -26,6 +28,13 @@
 - agentforge-rs: `/root/agentforge-rs/` ← **当前项目**
 - hermes-agent: `/root/hermes-agent/`
 - 所有 agent 工作树: `/tmp/agentforge-worktrees/<agent_name>/`
+
+**项目目录结构：**
+- `agents/` — 8 个智能体 YAML 配置（角色/约束/门禁/工作目录）
+- `skills/` — 8 个 Harness Engineering 技能文件
+- `codex-config/` — Codex CLI 配置模板
+- `deploy/` — systemd 服务模板 + 一键部署脚本
+- `config/` — 运行时配置（git 忽略）
 
 ---
 
@@ -287,13 +296,62 @@ cargo run -- pipeline --max-bugs 5
 
 ---
 
+## 📊 L4 量化分析
+
+### 数据来源
+- **TraceStore** (SQLite): `/var/lib/agentforge/traces.db`
+  - agent_id, event, task_id, duration_ms, status
+- **FixTrajectory** (JSON): `/var/lib/agentforge/trajectories/`
+  - bug_id, agent, success, elapsed_s, fix_summary
+- **DeadLetter** (Redis): `agentforge:dead_letter`
+  - 失败任务持久化
+
+### 分析指标
+| 指标 | 来源 | 用途 |
+|---|---|---|
+| Agent 成功率 | TraceStore `fix_done` 事件 | 评估智能体表现 |
+| 平均修复耗时 | TraceStore `duration_ms` | 识别慢修复 |
+| 失败模式分布 | TraceStore `status=failed` | 针对性优化 |
+| Pipeline 吞吐量 | TraceStore 全量事件 | 监控整体健康度 |
+
+### CLI 命令
+```bash
+agentforge analytics          # JSON 指标输出
+agentforge report             # Markdown 分析报告
+```
+
+---
+
+## 🧠 L5 AI 自主优化
+
+### 优化机制
+| 机制 | 触发条件 | 动作 |
+|---|---|---|
+| 约束增强 | Agent 成功率 < 50%（≥3次修复） | 自动补充专项约束 |
+| 智能路由 | 按 bug 类型匹配历史最优 Agent | `best_agent_for(bug_type)` |
+| 重试策略 | 失败后换提示词/换 Agent 重试 | 最多 3 次 |
+| 路由调整 | 某 Agent 成功率最低（< 40%） | 减少分配，转移给最优 Agent |
+
+### 评分系统
+- **评分维度**: 成功率(60%) + 速度(20%) + 类型匹配(20%)
+- **持久化**: `/var/lib/agentforge/agent_scores.json`
+- **更新时机**: 每次 fix_done 事件后
+
+### CLI 命令
+```bash
+agentforge optimize           # 分析 + 优化建议
+agentforge scores             # 智能体评分排名
+```
+
+---
+
 ## 📈 成熟度追踪
 
 | 等级 | 特征 | 本项目 |
 |---|---|---|
 | L1 初始 | 无规范 | ✅ 已超越 |
-| L2 管理 | 基础约束 + 反馈 | ✅ **当前** |
-| L3 定义 | 标准化流程 + 自动提交 + 禅道闭环 | 🔄 **已达成** |
+| L2 管理 | 基础约束 + 反馈 | ✅ 已完成 |
+| L3 定义 | 标准化流程 + 自动提交 + 禅道闭环 | ✅ 已完成 |
 | L4 量化 | 数据驱动优化 | ✅ **已达成** |
 | L5 优化 | AI 自主优化 | ✅ **已达成** |
 
@@ -305,5 +363,7 @@ cargo run -- pipeline --max-bugs 5
 |---|---|---|
 | 2026-05-28 | v1.0 | 初始版本 — 5 子系统模型 |
 | 2026-05-28 | v2.0 | 完整 Harness Engineering 方法论 + 全链路 6 环 + Pipeline 管线 |
+| 2026-05-31 | v3.0 | L4 量化分析 + L5 AI 自主优化 + 脱敏 + 多语言 README |
+| 2026-05-31 | v3.1 | 8 智能体独立配置文件 + 部署脚本 + Skills + Codex 配置 |
 
 > **总纲：** 一次一个功能，全链路 6 环，编译通过再提交，提交必修远程，修完必写备注。
