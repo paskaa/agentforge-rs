@@ -123,7 +123,7 @@ fn current_bug_for(id: &str) -> String {
     let db_path = "/var/lib/agentforge/traces.db";
     let output = std::process::Command::new("sqlite3")
         .args([db_path, &format!(
-            "SELECT task_id FROM traces WHERE agent_id='{}' AND event='fix_start' AND task_id IS NOT NULL AND task_id != '?' ORDER BY ts DESC LIMIT 1", id
+            "SELECT t.task_id FROM traces t WHERE t.agent_id='{}' AND t.event='fix_start' AND t.task_id IS NOT NULL AND t.task_id != '?' AND NOT EXISTS (SELECT 1 FROM traces t2 WHERE t2.agent_id=t.agent_id AND t2.task_id=t.task_id AND t2.event='fix_done' AND t2.ts > t.ts) ORDER BY t.ts DESC LIMIT 1", id
         )])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())

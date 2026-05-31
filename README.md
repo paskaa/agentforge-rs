@@ -1,10 +1,12 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-blue?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/version-0.1.0-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.2.0-green" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/agents-8-orange" alt="Agents">
   <img src="https://img.shields.io/badge/model-mimo--v2.5-purple" alt="Model">
   <img src="https://img.shields.io/badge/maturity-L5-brightgreen" alt="Maturity L5">
+  <img src="https://img.shields.io/badge/ui-Element%20Plus-blue" alt="Element Plus">
+  <img src="https://img.shields.io/badge/realtime-WebSocket-green" alt="WebSocket">
 </p>
 
 <h1 align="center">AgentForge-RS</h1>
@@ -26,7 +28,7 @@
 
 ## Overview
 
-AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust. It orchestrates 8 AI agents to scan, diagnose, fix, test, and document bugs from Zentao, with automatic git commits, quality gates, and Feishu notifications.
+AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust. It orchestrates 8 AI agents to scan, diagnose, fix, test, and document bugs from Zentao, with automatic git commits, quality gates, and Feishu notifications. Features a **real-time Web Dashboard** built with Vue 3 + Element Plus.
 
 **Harness Engineering Maturity: L5 (Fully Optimized)**
 
@@ -34,19 +36,30 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
 
 - **8 Specialized Agents** — Backend, Frontend, DBA, Tester, PM, Docs, Coordination, Architect
 - **Automated Pipeline** — Scan → Queue → Fix → Quality gates → Commit + push → Zentao comments
+- **Real-Time Dashboard** — Vue 3 + Element Plus, WebSocket real-time logs, clickable stats
 - **Quality Gates** — Compilation, SQL validation, code review before commit
-- **Zentao Integration** — Read bugs, structured comments, assignment management
+- **Zentao Integration** — Read bugs, structured comments, assignment management, bug detail links
 - **Feishu Notifications** — Real-time alerts
 - **Git Worktree Isolation** — Each agent has its own worktree
 - **Dead Letter Queue** — Failed tasks preserved for retry
 - **Full-Chain Fix** — Frontend → Controller → Service → Mapper → DB
 - **L4 Analytics** — Data-driven: success rates, failure patterns, agent scoring
-- **L5 Self-Optimizer** — AI auto-tuning: constraints, smart routing, retry strategy
+- **L5 Self-Optimizer** — AI auto-tuning: constraints, smart routing, retry strategy with git diff tracking
+- **Batch Enqueue** — Select multiple bugs and enqueue to agents from the dashboard
+- **Pipeline Progress** — 13-node visualization (分配→分析→尝试→LLM→生成→重试→完成→测试→验证→Diff→验收→归档→解决)
 
 ## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
+│               Web Dashboard (Vue3 + Element Plus)        │
+│  http://localhost:18081                                   │
+│  WebSocket: /ws  →  Real-time agent logs                 │
+│  REST API: /api/dashboard, /api/queues, /api/bugs        │
+│              /api/analytics, /api/agent/:id/traces        │
+└──────────────┬──────────────────────────┬────────────────┘
+               │                          │
+┌──────────────▼──────────────────────────▼────────────────┐
 │                    Pipeline (CLI)                         │
 │  scan Zentao → queue to Redis → poll for results         │
 └──────────────┬──────────────────────────┬────────────────┘
@@ -60,11 +73,14 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
     │  → quality gates     │    │  → quality gates     │
     │  → git commit+push   │    │  → git commit+push   │
     │  → zentao comment    │    │  → zentao comment    │
-    └──────────────────────┘    └──────────────────────┘
+    │  → Redis pub/sub     │    │  → Redis pub/sub     │
+    └──────────┬───────────┘    └──────────┬───────────┘
                │                          │
     ┌──────────▼──────────────────────────▼──────────┐
     │         L4 Analytics + L5 Self-Optimizer         │
     │  TraceStore → Metrics → Auto-tune → Scores      │
+    │  failure_patterns → constraint_adjustments      │
+    │  L5 optimization_log.json + git diff tracking   │
     └─────────────────────────────────────────────────┘
 ```
 
@@ -74,24 +90,22 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
 git clone https://github.com/paskaa/agentforge-rs.git
 cd agentforge-rs
 sudo bash deploy/setup.sh          # one-click deploy
-# or
-cargo build --release
-cp target/release/agentforge /usr/local/bin/agentforge
 ```
 
 ### Configure
 
 ```bash
 cp config/agentforge.yaml.example config/agentforge.yaml
-# edit with your credentials
+# edit with your credentials (Redis, Zentao, LLM, Feishu)
 ```
 
 ### Run
 
 ```bash
 agentforge scan-bugs                    # scan all active bugs
-agentforge pipeline --max-bugs 10       # fix pipeline
+agentforge pipeline --max-bugs 10       # run fix pipeline
 agentforge executor --agent zhaoyun     # start single agent
+agentforge web --port 18081             # start dashboard
 agentforge analytics                    # L4: metrics JSON
 agentforge report                       # L4: Markdown report
 agentforge optimize                     # L5: self-optimize
@@ -105,15 +119,47 @@ agentforge scores                       # L5: agent scores
 | `scan-bugs` | Scan all active bugs from Zentao |
 | `pipeline --max-bugs N` | Run bug-fixing pipeline |
 | `executor --agent <name>` | Start agent executor |
+| `web --port <port>` | Start dashboard server |
 | `query-bug --bug-id N` | Query bug details |
 | `analytics` | L4: Metrics JSON from TraceStore |
-| `report` | L4: Markdown analytics report |
-| `optimize` | L5: Self-optimizer analysis |
+| `report` | L4: Markdown analysis report |
+| `optimize` | L5: Self-optimize with git diff tracking |
 | `scores` | L5: Agent performance scores |
+
+## 🖥️ Web Dashboard
+
+The dashboard runs on port **18081** with these pages:
+
+| Page | Path | Description |
+|---|---|---|
+| **Dashboard** | `/` | Stats cards (clickable), recent fixes, pipeline status |
+| **Bug List** | `/bugs` | All bugs with refresh, batch enqueue, severity labels |
+| **Agent Detail** | `/agent/:id` | WebSocket real-time logs, queue, success rate |
+| **Agents** | `/agents` | All 8 agents with L5 scores (2 decimal places) |
+| **Analytics** | `/analytics` | L4 metrics + L5 optimization records with git history |
+| **Queues** | `/queues` | Pipeline progress visualization (13 nodes) |
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/dashboard` | GET | Dashboard stats + recent fixes |
+| `/api/queues` | GET | All agent queues with current bug |
+| `/api/bugs` | GET | All bugs from Zentao |
+| `/api/bugs/fixed_today` | GET | Today's fixed bugs |
+| `/api/bugs/:id/traces` | GET | Bug trace timeline |
+| `/api/bugs/enqueue` | POST | Enqueue single bug |
+| `/api/bugs/batch-enqueue` | POST | Batch enqueue multiple bugs |
+| `/api/analytics` | GET | Full L4 analytics report |
+| `/api/agent/:id/traces` | GET | Agent trace history |
+| `/api/agent/:id/traces/rt` | GET | Agent real-time traces |
+| `/api/agent/:id/queue` | GET | Agent queue items |
+| `/api/l5/optimizations` | GET | L5 optimization log |
+| `/ws` | WebSocket | Real-time trace broadcast |
 
 ## 🤖 Agent System
 
-| Agent | Name | Role | Expertise |
+| Code | Name | Role | Expertise |
 |---|---|---|---|
 | `guanyu` | 关羽 | Backend Dev | Java, Spring, API |
 | `zhaoyun` | 赵云 | Frontend Dev | Vue, UI |
@@ -126,43 +172,54 @@ agentforge scores                       # L5: agent scores
 
 Agent configs: `agents/*.yaml` | Skills: `skills/` | Deploy: `deploy/`
 
-## 📊 Maturity
-
-| Level | Feature | Status |
-|---|---|---|
-| L1 Initial | No standards | ✅ Exceeded |
-| L2 Managed | Basic constraints + feedback | ✅ Done |
-| L3 Defined | Standardized flow + auto-commit + Zentao | ✅ Done |
-| L4 Quantitative | Data-driven optimization | ✅ Done |
-| L5 Optimizing | AI self-optimization | ✅ Done |
-
 ## 📁 Project Structure
 
 ```
 agentforge-rs/
-├── src/                    # Rust source
-│   ├── core/
-│   │   ├── coordinator.rs  # Pipeline orchestration
-│   │   ├── executor.rs     # Agent executor loop
-│   │   ├── subagent.rs     # Codex integration + prompts
-│   │   ├── analytics.rs    # L4: Metrics
-│   │   ├── report.rs       # L4: Reports
-│   │   ├── self_optimizer.rs # L5: Auto-tuning
-│   │   ├── trace.rs        # SQLite trace store
-│   │   └── zentao.rs       # Zentao API client
-│   └── network/            # Feishu + WebSocket
-├── agents/                 # 8 agent YAML configs
-├── skills/                 # 8 Harness Engineering skills
-├── codex-config/           # Codex CLI config templates
-├── deploy/                 # systemd + setup scripts
-├── config/                 # Runtime config (git-ignored)
-├── .harness/               # Harness state files
-└── AGENTS.md               # Methodology docs
+├── src/
+│   └── core/
+│       ├── analytics.rs          # L4 analytics engine
+│       ├── coordinator.rs        # Bug routing + Zentao integration
+│       ├── executor.rs           # Agent executor main loop
+│       ├── fix_trajectory.rs     # Fix trajectory tracking
+│       ├── pipeline.rs           # Batch bug-fixing pipeline
+│       ├── self_optimizer.rs     # L5 self-optimization engine
+│       ├── subagent.rs           # Codex invocation + prompt builder
+│       ├── trace.rs              # SQLite trace store
+│       ├── web_server.rs         # REST API + WebSocket server
+│       └── zentao.rs             # Zentao API client
+├── web/                          # Vue 3 + Element Plus frontend
+│   └── src/
+│       ├── views/
+│       │   ├── Dashboard.vue     # Main dashboard
+│       │   ├── BugList.vue       # Bug list with batch enqueue
+│       │   ├── AgentDetail.vue   # Agent detail + WebSocket logs
+│       │   ├── Agents.vue        # Agent system overview
+│       │   ├── Analytics.vue     # L4/L5 analytics
+│       │   └── Queues.vue        # Pipeline progress
+│       └── components/
+│           ├── BugTable.vue      # Bug table with enqueue button
+│           ├── FixTable.vue      # Fix history table
+│           └── PipelineProgress.vue # 13-node pipeline visualization
+├── agents/                       # 8 agent YAML configurations
+├── skills/                       # 8 Harness Engineering skill files
+├── codex-config/                 # Codex CLI config templates
+├── deploy/                       # systemd service templates + setup
+├── .harness/                     # Harness Engineering metadata
+├── config/
+│   └── agentforge.yaml           # Runtime configuration
+└── AGENTS.md                     # Harness Engineering master doc
 ```
 
-## 🔧 Tech Stack
+## 📊 Maturity Model
 
-Rust 2021 | Tokio | Redis Streams | Reqwest | sqlparser-rs | quick-xml | Serde | Clap | Tracing | SQLite
+| Level | Characteristics | Status |
+|---|---|---|
+| L1 Initial | No standards | ✅ Surpassed |
+| L2 Managed | Basic constraints + feedback | ✅ Complete |
+| L3 Defined | Standardized workflow + auto-commit + Zentao | ✅ Complete |
+| L4 Quantitative | Data-driven optimization | ✅ Complete |
+| L5 Optimizing | AI self-optimization | ✅ Complete |
 
 ## 📜 License
 
@@ -172,24 +229,63 @@ MIT
 
 # 🇨🇳 简体中文
 
-## 概述
+## 概览
 
-AgentForge-RS 是用 Rust 编写的**多智能体自动化 Bug 修复框架**。协调 8 个 AI 智能体，从禅道扫描、诊断、修复、测试并记录 Bug，支持自动 Git 提交、质量门禁和飞书通知。
+AgentForge-RS 是一个基于 Rust 构建的**多智能体自动 Bug 修复框架**。8 个 AI 智能体协同工作，从禅道扫描、诊断、修复、测试、归档 Bug，支持自动 Git 提交、质量门禁、飞书通知。配备**实时 Web 控制面板**（Vue 3 + Element Plus）。
 
 **Harness Engineering 成熟度：L5（完全优化）**
 
 ## ✨ 特性
 
-- **8 个专业智能体** — 各司其职
-- **自动化流水线** — 扫描 → 队列 → 修复 → 门禁 → 提交 → 禅道备注
-- **质量门禁** — 编译检查、SQL 校验、代码审查
-- **禅道集成** — 读取 Bug、结构化备注、分配管理
-- **飞书通知** — 实时推送
-- **Git Worktree 隔离** — 互不冲突
+- **8 个专业智能体** — 后端、前端、DBA、测试、PM、文档、协调、架构师
+- **自动流水线** — 扫描 → 入列 → 修复 → 质量门禁 → 提交推送 → 禅道备注
+- **实时控制面板** — Vue 3 + Element Plus，WebSocket 实时日志，可点击统计卡片
+- **质量门禁** — 编译验证、SQL 校验、代码审查
+- **禅道集成** — 读取 Bug、结构化备注、分配管理、Bug 链接跳转
+- **飞书通知** — 实时告警
+- **Git Worktree 隔离** — 每个智能体独立工作树
 - **死信队列** — 失败任务持久化
 - **全链路修复** — 前端 → Controller → Service → Mapper → DB
-- **L4 量化分析** — 成功率、失败模式、智能体评分
-- **L5 自主优化** — 约束调整、智能路由、重试策略
+- **L4 量化分析** — 数据驱动：成功率、失败模式、智能体评分
+- **L5 AI 自主优化** — 智能调优：约束增强、智能路由、重试策略，含 Git Diff 追踪
+- **批量入列** — 在面板中选择多个 Bug 一键入列
+- **流水线进度** — 13 节点可视化（分配→分析→尝试→LLM→生成→重试→完成→测试→验证→Diff→验收→归档→解决）
+
+## 🏗️ 架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│               Web 控制面板 (Vue3 + Element Plus)         │
+│  http://localhost:18081                                  │
+│  WebSocket: /ws  →  智能体实时日志                       │
+│  REST API: /api/dashboard, /api/queues, /api/bugs       │
+│              /api/analytics, /api/agent/:id/traces       │
+└──────────────┬──────────────────────────┬───────────────┘
+               │                          │
+┌──────────────▼──────────────────────────▼───────────────┐
+│                    流水线 (Pipeline)                      │
+│  扫描禅道 → Redis 队列 → 等待结果                        │
+└──────────────┬──────────────────────────┬───────────────┘
+               │                          │
+    ┌──────────▼──────────┐    ┌──────────▼──────────┐
+    │   智能体执行器       │    │   智能体执行器       │
+    │   (guanyu/zhaoyun)   │    │   (xunyu/huatuo)    │
+    │  消费 Redis 队列     │    │  消费 Redis 队列     │
+    │  → 构建 Prompt       │    │  → 构建 Prompt       │
+    │  → 调用 Codex        │    │  → 调用 Codex        │
+    │  → 质量门禁          │    │  → 质量门禁          │
+    │  → Git 提交推送      │    │  → Git 提交推送      │
+    │  → 禅道备注          │    │  → 禅道备注          │
+    │  → Redis pub/sub     │    │  → Redis pub/sub     │
+    └──────────┬───────────┘    └──────────┬───────────┘
+               │                          │
+    ┌──────────▼──────────────────────────▼──────────┐
+    │         L4 量化分析 + L5 AI 自主优化              │
+    │  TraceStore → 指标 → 自动调优 → 评分             │
+    │  失败模式分析 → 约束调整                         │
+    │  L5 优化日志 + Git Diff 追踪                     │
+    └─────────────────────────────────────────────────┘
+```
 
 ## ⚡ 快速开始
 
@@ -203,33 +299,52 @@ sudo bash deploy/setup.sh          # 一键部署
 
 ```bash
 cp config/agentforge.yaml.example config/agentforge.yaml
-# 编辑填入凭据
+# 编辑配置（Redis、禅道、LLM、飞书）
 ```
 
 ### 运行
 
 ```bash
 agentforge scan-bugs                    # 扫描所有活跃 Bug
-agentforge pipeline --max-bugs 10       # 流水线修复
+agentforge pipeline --max-bugs 10       # 运行修复流水线
 agentforge executor --agent zhaoyun     # 启动单个智能体
+agentforge web --port 18081             # 启动控制面板
 agentforge analytics                    # L4：指标 JSON
 agentforge report                       # L4：Markdown 报告
-agentforge optimize                     # L5：自优化分析
+agentforge optimize                     # L5：自优化
 agentforge scores                       # L5：智能体评分
 ```
 
-## 🖥️ CLI 命令
+## 🖥️ 控制面板
 
-| 命令 | 说明 |
-|---|---|
-| `scan-bugs` | 从禅道扫描所有活跃 Bug |
-| `pipeline --max-bugs N` | 运行 Bug 修复流水线 |
-| `executor --agent <name>` | 启动智能体执行器 |
-| `query-bug --bug-id N` | 查询 Bug 详情 |
-| `analytics` | L4：从 TraceStore 生成指标 |
-| `report` | L4：生成 Markdown 分析报告 |
-| `optimize` | L5：自优化分析 + 建议 |
-| `scores` | L5：智能体性能评分 |
+面板运行在端口 **18081**，包含以下页面：
+
+| 页面 | 路径 | 说明 |
+|---|---|---|
+| **仪表盘** | `/` | 统计卡片（可点击）、最近修复、流水线状态 |
+| **Bug 列表** | `/bugs` | 所有 Bug，支持刷新、批量入列、严重程度标签 |
+| **智能体详情** | `/agent/:id` | WebSocket 实时日志、队列、成功率 |
+| **智能体系统** | `/agents` | 8 个智能体 + L5 评分（保留 2 位小数） |
+| **L4/L5 分析** | `/analytics` | L4 指标 + L5 优化记录（含 Git 历史） |
+| **队列** | `/queues` | 流水线进度可视化（13 节点） |
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/dashboard` | GET | 仪表盘统计 + 最近修复 |
+| `/api/queues` | GET | 所有智能体队列 + 当前处理 |
+| `/api/bugs` | GET | 禅道所有 Bug |
+| `/api/bugs/fixed_today` | GET | 今日修复 Bug |
+| `/api/bugs/:id/traces` | GET | Bug 修复时间线 |
+| `/api/bugs/enqueue` | POST | 单个 Bug 入列 |
+| `/api/bugs/batch-enqueue` | POST | 批量 Bug 入列 |
+| `/api/analytics` | GET | 完整 L4 分析报告 |
+| `/api/agent/:id/traces` | GET | 智能体修复历史 |
+| `/api/agent/:id/traces/rt` | GET | 智能体实时追踪 |
+| `/api/agent/:id/queue` | GET | 智能体队列 |
+| `/api/l5/optimizations` | GET | L5 优化记录 |
+| `/ws` | WebSocket | 实时追踪推送 |
 
 ## 🤖 智能体系统
 
@@ -246,7 +361,46 @@ agentforge scores                       # L5：智能体评分
 
 智能体配置：`agents/*.yaml` | 技能：`skills/` | 部署：`deploy/`
 
-## 📊 成熟度
+## 📁 项目结构
+
+```
+agentforge-rs/
+├── src/
+│   └── core/
+│       ├── analytics.rs          # L4 量化分析引擎
+│       ├── coordinator.rs        # Bug 路由 + 禅道集成
+│       ├── executor.rs           # 智能体执行器主循环
+│       ├── fix_trajectory.rs     # 修复轨迹记录
+│       ├── pipeline.rs           # 批量修复流水线
+│       ├── self_optimizer.rs     # L5 自优化引擎
+│       ├── subagent.rs           # Codex 调用 + Prompt 构建
+│       ├── trace.rs              # SQLite 追踪存储
+│       ├── web_server.rs         # REST API + WebSocket 服务
+│       └── zentao.rs             # 禅道 API 客户端
+├── web/                          # Vue 3 + Element Plus 前端
+│   └── src/
+│       ├── views/
+│       │   ├── Dashboard.vue     # 主仪表盘
+│       │   ├── BugList.vue       # Bug 列表 + 批量入列
+│       │   ├── AgentDetail.vue   # 智能体详情 + WebSocket 日志
+│       │   ├── Agents.vue        # 智能体系统总览
+│       │   ├── Analytics.vue     # L4/L5 分析
+│       │   └── Queues.vue        # 流水线进度
+│       └── components/
+│           ├── BugTable.vue      # Bug 表格 + 入列按钮
+│           ├── FixTable.vue      # 修复历史表格
+│           └── PipelineProgress.vue # 13 节点流水线可视化
+├── agents/                       # 8 个智能体 YAML 配置
+├── skills/                       # 8 个 Harness Engineering 技能文件
+├── codex-config/                 # Codex CLI 配置模板
+├── deploy/                       # systemd 服务模板 + 部署脚本
+├── .harness/                     # Harness Engineering 元数据
+├── config/
+│   └── agentforge.yaml           # 运行时配置
+└── AGENTS.md                     # Harness Engineering 总纲
+```
+
+## 📊 成熟度模型
 
 | 等级 | 特征 | 状态 |
 |---|---|---|
@@ -266,7 +420,7 @@ MIT
 
 ## 概要
 
-AgentForge-RSはRustで構築された**マルチエージェント自動バグ修正フレームワーク**です。8つのAIエージェントを連携させ、Zentaoからバグをスキャン、診断、修正、テストし、自動コミット、品質ゲート、Feishu通知に対応しています。
+AgentForge-RSはRustで構築された**マルチエージェント自動バグ修正フレームワーク**です。8つのAIエージェントを連携させ、Zentaoからバグをスキャン、診断、修正、テストし、自動コミット、品質ゲート、Feishu通知に対応しています。**リアルタイムWebダッシュボード**（Vue 3 + Element Plus）を装備。
 
 **Harness Engineering 成熟度：L5（完全最適化）**
 
@@ -274,14 +428,15 @@ AgentForge-RSはRustで構築された**マルチエージェント自動バグ�
 
 - **8つの専門エージェント** — バックエンド、フロントエンド、DBA、テスト、PM、ドキュメント、協調、アーキテクト
 - **自動パイプライン** — スキャン → キュー → 修正 → 品質ゲート → コミット+プッシュ → Zentaoコメント
+- **リアルタイムダッシュボード** — Vue 3 + Element Plus、WebSocketリアルタイムログ
 - **品質ゲート** — コンパイル、SQL検証、コードレビュー
 - **Zentao連携** — バグ読み取り、構造化コメント、アサイン管理
-- **Feishu通知** — リアルタイム通知
 - **Git Worktree分離** — 競合なし
-- **デッドレターキュー** — 失敗タスク永続化
 - **フルチェーン修正** — フロントエンド → Controller → Service → Mapper → DB
 - **L4 分析** — データドリブン最適化：成功率、失敗パターン、エージェントスコア
-- **L5 自己最適化** — AI自律最適化：制約調整、スマートルーティング、リトライ戦略
+- **L5 自己最適化** — AI自律最適化：制約調整、スマートルーティング、Git Diff追跡
+- **バッチエンキュー** — ダッシュボードから複数バグを一括キュー投入
+- **パイプライン進捗** — 13ノード可視化
 
 ## ⚡ クイックスタート
 
@@ -304,24 +459,23 @@ cp config/agentforge.yaml.example config/agentforge.yaml
 agentforge scan-bugs                    # 全アクティブバグスキャン
 agentforge pipeline --max-bugs 10       # パイプライン修正
 agentforge executor --agent zhaoyun     # 単一エージェント起動
+agentforge web --port 18081             # ダッシュボード起動
 agentforge analytics                    # L4：指標JSON
 agentforge report                       # L4：Markdownレポート
 agentforge optimize                     # L5：自己最適化
 agentforge scores                       # L5：エージェントスコア
 ```
 
-## 🖥️ CLI コマンド
+## 🖥️ ダッシュボード
 
-| コマンド | 説明 |
-|---|---|
-| `scan-bugs` | Zentaoから全アクティブバグスキャン |
-| `pipeline --max-bugs N` | バグ修正パイプライン |
-| `executor --agent <name>` | エージェント実行器起動 |
-| `query-bug --bug-id N` | バグ詳細照会 |
-| `analytics` | L4：TraceStoreから指標生成 |
-| `report` | L4：Markdown分析レポート |
-| `optimize` | L5：自己最適化分析 |
-| `scores` | L5：エージェントパフォーマンススコア |
+| ページ | パス | 説明 |
+|---|---|---|
+| **ダッシュボード** | `/` | 統計カード、最近の修正、パイプライン状態 |
+| **バグ一覧** | `/bugs` | 全バグ、リフレッシュ、バッチエンキュー |
+| **エージェント詳細** | `/agent/:id` | WebSocketリアルタイムログ、キュー |
+| **エージェントシステム** | `/agents` | 8エージェント + L5スコア |
+| **L4/L5分析** | `/analytics` | L4指標 + L5最適化記録 |
+| **キュー** | `/queues` | パイプライン進捗可視化 |
 
 ## 🤖 エージェントシステム
 
@@ -337,6 +491,20 @@ agentforge scores                       # L5：エージェントスコア
 | `zhugeliang` | 諸葛亮 | アーキテクト | アーキテクチャ設計 |
 
 エージェント設定：`agents/*.yaml` | スキル：`skills/` | デプロイ：`deploy/`
+
+## 📁 プロジェクト構成
+
+```
+agentforge-rs/
+├── src/core/          # Rust バックエンド (L4/L5 エンジン含む)
+├── web/               # Vue 3 + Element Plus フロントエンド
+├── agents/            # 8 エージェント YAML 設定
+├── skills/            # 8 Harness Engineering スキルファイル
+├── codex-config/      # Codex CLI 設定テンプレート
+├── deploy/            # systemd サービステンプレート
+├── .harness/          # Harness Engineering メタデータ
+└── AGENTS.md          # Harness Engineering 総綱
+```
 
 ## 📊 成熟度モデル
 

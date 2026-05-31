@@ -19,3 +19,4 @@ config/agentforge.yaml
 web/node_modules/
 web/dist/
 static/
+traces.db
