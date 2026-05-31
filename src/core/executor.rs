@@ -437,6 +437,29 @@ impl AgentExecutor {
             }
             let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
 
+            // ── 全链路验证（编译 + 测试 + Playwright + 数据库 + 接口）──
+            let verification = super::verification::run_full_verification(&an, &bid, &m, 
+                if an == "zhaoyun" { 
+                    "/tmp/agentforge-worktrees/zhaoyun/openhis-ui-vue3" 
+                } else { 
+                    "/tmp/agentforge-worktrees/guanyu/openhis-server-new" 
+                });
+            
+            tracing::info!("[{}] Bug #{} 验证结果: {} ({}ms)", an, bid, verification.summary, verification.total_ms);
+            tr.log(&an, "verification", Some(&format!("Bug#{}", bid)), 
+                Some(&verification.summary), Some("verification"), None, 
+                Some(verification.total_ms as i64), 
+                Some(if verification.all_passed {"ok"} else {"failed"})).await;
+            
+            // 验证失败 → 不进 pipeline，标记为失败
+            if !verification.all_passed && r.success {
+                tracing::warn!("[{}] Bug #{} 编译/测试通过但全链路验证失败: {}", an, bid, verification.summary);
+                let _: redis::RedisResult<()> = redis_clone.sadd(format!("agent-failed-bugs:{}", an), &bid).await;
+                let queue_key = format!("agent-work-queue:fix:{}", an);
+                let _: redis::RedisResult<i64> = redis_clone.lrem(&queue_key, 1, &m).await;
+                return;
+            }
+
             // L5: 自动评分 — 更新 agent 成功率和耗时
             {
                 let scores_path = "/var/lib/agentforge/agent_scores.json";

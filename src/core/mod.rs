@@ -15,4 +15,5 @@ pub mod analytics;
 pub mod report;
 pub mod self_optimizer;
 
+pub mod verification;
 pub mod web_server;
