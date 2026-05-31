@@ -464,6 +464,21 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
             println!("  Bug #{} [{}]: {} ({}ms)", r.bug_id, r.fixer, r.bug_title, r.elapsed_ms);
         }
     }
+
+    // L5: batch 结束后自动运行自优化
+    if !results.is_empty() {
+        println!("\n🔧 L5: 运行自优化分析...");
+        match tokio::process::Command::new("agentforge").arg("optimize").output().await {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // 只打印最后几行摘要
+                let summary: String = stdout.lines().rev().take(5).collect::<Vec<_>>().join("\n");
+                if !summary.is_empty() { println!("{}", summary); }
+            }
+            Err(e) => tracing::warn!("L5 optimize failed: {}", e),
+        }
+    }
+
     Ok(())
 }
 

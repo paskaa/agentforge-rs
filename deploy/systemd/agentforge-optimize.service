@@ -1,0 +1,11 @@
+[Unit]
+Description=AgentForge L5 Self-Optimizer
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/agentforge optimize
+WorkingDirectory=/root/agentforge-rs
+Environment=RUST_LOG=info
+StandardOutput=journal
+StandardError=journal

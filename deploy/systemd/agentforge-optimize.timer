@@ -1,0 +1,10 @@
+[Unit]
+Description=AgentForge L5 Self-Optimizer Timer (every 30min)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
