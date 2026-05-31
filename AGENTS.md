@@ -298,6 +298,16 @@ cargo run -- pipeline --max-bugs 5
 15. **修后必关禅道** — 修复成功后必须调用 `resolve_bug_in_zentao()` 关闭 bug 并写入结构化备注。不关禅道 = 浪费后续所有 agent 的处理时间。
 16. **测试环境必须就绪** — zhangfei 运行 Playwright 前必须确认：(1) node_modules 已安装 (2) dev server 已启动 (3) 目标 URL 可达。环境不就绪则跳过测试，不记录 test_done。
 17. **修复失败必须退出** — 同一个 bug 被标记为"之前已修复，无需改动"后，必须退出并关闭禅道，不允许反复重试同一个已修复的 bug。
+18. **Pipeline 入列前三重检查** — 每次入列前必须执行：
+    - (1) 禅道状态检查：`status == resolved || status == closed` → 跳过
+    - (2) develop 分支检查：`git log origin/develop --grep="Bug#N"` 有 commit → 跳过
+    - (3) Redis 锁检查：`codex_lock:{agent}` 存在 → 跳过（正在处理中）
+    - 三重检查全部通过才允许入列。违反此条 = 浪费全系统资源。
+19. **同一 Bug 禁止重复入列** — 同一个 bug_id 在 Redis 队列中只能存在一条。入列前用 `lrange` 检查队列是否已有该 bug。重复入列 = 流水线 bug。
+20. **验证不通过禁止进 Pipeline** — fix_done 后必须运行 `run_full_verification()`，验证不通过的任务**禁止进入 pipeline 测试流程**，直接标记为失败并记录原因。
+21. **测试失败禁止关禅道** — zhangfei 的 Playwright 测试或华佗的验收失败时，**禁止**调用 `resolve_bug_in_zentao()`。只有测试全部通过才能关禅道。
+22. **修复结果必须有全链路证据** — 每个标记为"已修复"的 bug，必须有：(1) verification event in traces (2) status=ok (3) 完整的 5 项检查结果存入 traces.detail。无证据的修复 = 假修复。
+23. **Executor 崩溃恢复** — 如果 executor 进程崩溃，Redis 中的 `codex_lock:{agent}` 必须在 TTL 过期后自动释放。新进程启动时必须检查并清理残留锁。
 
 ---
 
