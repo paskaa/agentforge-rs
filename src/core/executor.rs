@@ -65,6 +65,15 @@ impl AgentExecutor {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
+        // 启动时清理可能残留的旧锁
+        if self.is_fixer {
+            let lock_key = format!("codex_lock:{}", self.agent_id);
+            let ttl: i64 = self.redis.clone().ttl(&lock_key).await.unwrap_or(-2);
+            if ttl != -2 {
+                tracing::info!("[{}] Cleaning up stale lock on startup (TTL={}s)", self.agent_id, ttl);
+                let _: redis::RedisResult<()> = self.redis.clone().del(&lock_key).await;
+            }
+        }
         tracing::info!("[{}] Started as {} (stream={}, fixer={})", self.agent_id, self.agent_name, self.fix_stream, self.is_fixer);
         // Non-fixer: read from stream without consumer group
         // (simpler than XREADGROUP — just xread with new messages)
@@ -80,7 +89,7 @@ impl AgentExecutor {
                 let my_lock = format!("codex_lock:{}", self.agent_id);
                 let ttl: i64 = self.redis.clone().ttl(&my_lock).await.unwrap_or(-2);
                 if ttl == -2 { /* key doesn't exist — no lock */ }
-                else if ttl > 0 && ttl < 900 {
+                else if ttl > 0 && ttl < 1800 {
                     // Lock held >45min (3600-900=2700s) — probably stale, release
                     tracing::warn!("[{}] Stale lock detected (TTL={}s), auto-releasing", self.agent_id, ttl);
                     let _: redis::RedisResult<()> = self.redis.clone().del(&my_lock).await;

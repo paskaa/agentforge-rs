@@ -993,9 +993,10 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                         tracing::info!("[{}] Bug #{} already fixed on develop — skipping cherry-pick", agent_name, bug_id);
                     } else {
                         // Try cherry-pick with -X theirs to auto-resolve simple conflicts
+                        let author = format!("{} <{}@gentronhealth.com>", agent_name, agent_name);
                         let cherry = Command::new("git")
                             .args(["-C", main_repo, "cherry-pick", "--strategy=recursive",
-                                   "-X", "theirs", &hash])
+                                   "-X", "theirs", "--author", &author, &hash])
                             .output();
                         match cherry {
                             Ok(o) if o.status.success() => {
@@ -1016,7 +1017,7 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                                     .args(["-C", main_repo, "pull", "--rebase", "origin", "develop"])
                                     .output();
                                 let cherry2 = Command::new("git")
-                                    .args(["-C", main_repo, "cherry-pick", &hash])
+                                    .args(["-C", main_repo, "cherry-pick", "--author", &author, &hash])
                                     .output();
                                 match cherry2 {
                                     Ok(o2) if o2.status.success() => {
