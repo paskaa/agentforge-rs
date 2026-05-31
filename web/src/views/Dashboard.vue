@@ -12,10 +12,13 @@
 
     <!-- Stats row -->
     <div class="stats-grid">
-      <div class="stat-card"><div class="stat-value">{{ stats.total || 0 }}</div><div class="stat-label">活跃 Bug</div></div>
-      <div class="stat-card success"><div class="stat-value">{{ stats.fixed_today || 0 }}</div><div class="stat-label">今日修复</div></div>
-      <div class="stat-card warning"><div class="stat-value">{{ stats.running || 0 }}</div><div class="stat-label">运行 Agent</div></div>
-      <div class="stat-card info"><div class="stat-value">{{ stats.rate || 'N/A' }}</div><div class="stat-label">今日成功率</div></div>
+      <div class="stat-card clickable" @click="showBugs('未关闭 Bug', 'unclosed')"><div class="stat-value">{{ zentao.unclosed || 0 }}</div><div class="stat-label">未关闭 Bug 🔍</div></div>
+      <div class="stat-card warning-border clickable" @click="showBugs('未解决 Bug', 'unresolved')"><div class="stat-value">{{ zentao.unresolved || 0 }}</div><div class="stat-label">未解决 Bug 🔍</div></div>
+      <div class="stat-card success clickable" @click="showBugs('今日修复', 'fixed_today')"><div class="stat-value">{{ stats.fixed_today || 0 }}</div><div class="stat-label">今日修复 🔍</div></div>
+      <div class="stat-card info"><div class="stat-value">{{ stats.running || 0 }}</div><div class="stat-label">运行 Agent</div></div>
+    </div>
+    <div style="font-size:11px;color:#64748b;margin:-16px 0 20px;text-align:right" v-if="zentao.last_sync">
+      禅道同步: {{ zentao.last_sync }} · 活跃: {{ zentao.active || 0 }} · 总计: {{ zentao.total || 0 }}
     </div>
 
     <!-- Agent cards -->
@@ -89,6 +92,41 @@
         </tbody>
       </table>
     </div>
+    <!-- Bug Detail Modal -->
+    <div class="modal-overlay" v-if="showModal" @click.self="closeModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>{{ modalTitle }} ({{ modalBugs.length }})</h3>
+          <span class="modal-close" @click="closeModal">✕</span>
+        </div>
+        <div class="modal-body">
+          <table class="bug-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>标题</th>
+                <th>状态</th>
+                <th>指派</th>
+                <th v-if="modalTitle.includes('修复')">耗时</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="b in modalBugs" :key="b.id">
+                <td class="mono">#{{ b.id }}</td>
+                <td class="bug-title">{{ b.title }}</td>
+                <td>
+                  <span class="status-tag" :class="'s-' + b.status">{{ b.status }}</span>
+                </td>
+                <td>{{ b.assigned_to || '-' }}</td>
+                <td v-if="modalTitle.includes('修复')">{{ b.duration || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="modalBugs.length === 0" class="empty-modal">暂无数据</div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -96,7 +134,11 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
 const stats = ref({})
+const zentao = ref({})
 const agents = ref([])
+const showModal = ref(false)
+const modalTitle = ref('')
+const modalBugs = ref([])
 const recent = ref([])
 const queue = ref([])
 const dispatcher = ref({})
@@ -107,6 +149,32 @@ const queueRef = ref(null)
 
 let ws = null
 let pollTimer = null
+
+async function fetchZentao() {
+  try {
+    const r = await fetch('/api/zentao/stats')
+    zentao.value = await r.json()
+  } catch {}
+}
+
+function showBugs(title, filter) {
+  modalTitle.value = title
+  const allBugs = zentao.value.bugs || []
+  if (filter === 'unclosed') {
+    modalBugs.value = allBugs.filter(b => b.status !== 'closed')
+  } else if (filter === 'unresolved') {
+    modalBugs.value = allBugs.filter(b => b.status === 'active')
+  } else if (filter === 'fixed_today') {
+    // Show recent fixes from dashboard
+    modalBugs.value = recent.value.map(r => ({
+      id: parseInt(r.bug) || 0, title: r.agent, status: r.ok ? 'ok' : 'failed',
+      assigned_to: r.agent, severity: '', duration: r.dur, ts: r.ts
+    }))
+  }
+  showModal.value = true
+}
+
+function closeModal() { showModal.value = false }
 
 async function fetchDashboard() {
   try {
@@ -145,8 +213,9 @@ function connectWs() {
 
 onMounted(() => {
   fetchDashboard()
+  fetchZentao()
   connectWs()
-  pollTimer = setInterval(fetchDashboard, 15000)
+  pollTimer = setInterval(() => { fetchDashboard(); fetchZentao(); }, 15000)
 })
 
 onUnmounted(() => {
@@ -170,6 +239,7 @@ onUnmounted(() => {
 .stat-card.success { border-left: 3px solid #22c55e; }
 .stat-card.warning { border-left: 3px solid #f59e0b; }
 .stat-card.info { border-left: 3px solid #3b82f6; }
+.stat-card.warning-border { border-left: 3px solid #f59e0b; }
 .stat-value { font-size: 28px; font-weight: 700; }
 .stat-label { font-size: 12px; color: #94a3b8; margin-top: 2px; }
 
@@ -220,4 +290,45 @@ onUnmounted(() => {
 .badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
 .badge.ok { background: #052e16; }
 .badge.fail { background: #450a0a; }
+
+.clickable { cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; }
+.clickable:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7); z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-content {
+  background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+  width: 90%; max-width: 900px; max-height: 80vh; display: flex; flex-direction: column;
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; border-bottom: 1px solid #334155;
+}
+.modal-header h3 { font-size: 16px; }
+.modal-close { cursor: pointer; font-size: 18px; color: #64748b; padding: 4px 8px; border-radius: 4px; }
+.modal-close:hover { background: #334155; color: #e2e8f0; }
+.modal-body { overflow-y: auto; padding: 0; }
+
+.bug-table { width: 100%; border-collapse: collapse; }
+.bug-table th {
+  text-align: left; padding: 10px 14px; font-size: 11px; color: #64748b;
+  text-transform: uppercase; border-bottom: 1px solid #334155;
+  position: sticky; top: 0; background: #1e293b;
+}
+.bug-table td { padding: 8px 14px; font-size: 13px; border-bottom: 1px solid rgba(51,65,85,0.5); }
+.bug-table tr:hover { background: rgba(59,130,246,0.05); }
+.bug-title { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mono { font-family: monospace; color: #60a5fa; }
+
+.status-tag { padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.s-active { background: #422006; color: #f59e0b; }
+.s-resolved { background: #052e16; color: #22c55e; }
+.s-closed { background: #1e293b; color: #64748b; }
+.s-ok { background: #052e16; color: #22c55e; }
+.s-failed { background: #450a0a; color: #ef4444; }
+
+.empty-modal { text-align: center; padding: 40px; color: #475569; }
 </style>

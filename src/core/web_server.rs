@@ -19,12 +19,33 @@ pub struct AppState {
     pub pool: Option<SqlitePool>,
     pub scores_path: String,
     pub tx: broadcast::Sender<String>,
+    pub zentao_cache: Arc<tokio::sync::RwLock<Option<(String, std::time::Instant)>>>,
 }
 
 // ── REST types ──
 
 #[derive(Serialize, Default)]
 struct HealthResp { ok: bool, version: String, agents: usize }
+
+#[derive(Serialize, Default)]
+struct ZentaoStats {
+    unclosed: i64,
+    unresolved: i64,
+    active: i64,
+    total: i64,
+    last_sync: String,
+    #[serde(default)]
+    bugs: Vec<ZentaoBug>,
+}
+
+#[derive(Serialize, Default)]
+struct ZentaoBug {
+    id: i64,
+    title: String,
+    status: String,
+    assigned_to: String,
+    severity: String,
+}
 
 #[derive(Serialize, Default)]
 struct DashResp {
@@ -245,6 +266,108 @@ async fn agent_traces(
     Json(serde_json::json!({"agent_id": agent_id, "traces": []}))
 }
 
+// ── Zentao Stats API ──
+
+async fn zentao_stats_api(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    // Check cache (60s TTL)
+    {
+        let cache = s.zentao_cache.read().await;
+        if let Some((ref json, ts)) = *cache {
+            if ts.elapsed() < std::time::Duration::from_secs(60) {
+                return Json(serde_json::from_str(json).unwrap_or(serde_json::json!({})));
+            }
+        }
+    }
+
+    // Fetch from Zentao API
+    let stats = fetch_zentao_stats(&s.pool).await;
+    let json_str = serde_json::to_string(&stats).unwrap_or_default();
+
+    // Update cache
+    {
+        let mut cache = s.zentao_cache.write().await;
+        *cache = Some((json_str.clone(), std::time::Instant::now()));
+    }
+
+    Json(serde_json::from_str(&json_str).unwrap_or(serde_json::json!({})))
+}
+
+async fn fetch_zentao_stats(_pool: &Option<SqlitePool>) -> ZentaoStats {
+    let base_url = "https://zentao.gentronhealth.com";
+    let token_file = "/root/.config/zentao/.env";
+    let token = std::fs::read_to_string(token_file)
+        .map(|s| {
+            for line in s.lines() {
+                if let Some(val) = line.strip_prefix("ZENTAO_TOKEN=") {
+                    return val.trim().to_string();
+                }
+            }
+            String::new()
+        })
+        .unwrap_or_default();
+
+    if token.is_empty() {
+        return ZentaoStats { last_sync: "no token".into(), ..Default::default() };
+    }
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    // Fetch all bugs (paginated)
+    let mut all_bugs: Vec<serde_json::Value> = Vec::new();
+    let mut page = 1;
+    loop {
+        let url = format!("{}/api.php/v1/products/4/bugs?page={}&limit=100", base_url, page);
+        let resp = client.get(&url).header("Token", &token).send().await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(body) = r.json::<serde_json::Value>().await {
+                    let bugs = body.get("bugs").and_then(|b| b.as_array()).cloned().unwrap_or_default();
+                    let total = body.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
+                    all_bugs.extend(bugs);
+                    if all_bugs.len() as i64 >= total { break; }
+                    page += 1;
+                } else { break; }
+            }
+            _ => break,
+        }
+    }
+
+    let total = all_bugs.len() as i64;
+    let mut unclosed = 0i64;  // 非 closed 的全部
+    let mut unresolved = 0i64; // active = 未解决
+    let mut active = 0i64;
+
+    for bug in &all_bugs {
+        let status = bug.get("status").and_then(|s| s.as_str()).unwrap_or("");
+        if status != "closed" { unclosed += 1; }
+        if status == "active" { active += 1; unresolved += 1; }
+    }
+
+    let bugs: Vec<ZentaoBug> = all_bugs.iter().map(|b| {
+        let assignee = b.get("assignedTo").and_then(|a| {
+            if a.is_object() { a.get("name").or(a.get("account")).and_then(|v| v.as_str()).map(String::from) }
+            else { a.as_str().map(String::from) }
+        }).unwrap_or_default();
+        ZentaoBug {
+            id: b.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+            title: b.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            status: b.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            assigned_to: assignee,
+            severity: b.get("severity").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        }
+    }).collect();
+
+    ZentaoStats {
+        unclosed, unresolved, active, total,
+        last_sync: chrono::Utc::now().format("%H:%M:%S").to_string(),
+        bugs,
+    }
+}
+
 // ── Queues API ──
 
 #[derive(Serialize)]
@@ -324,6 +447,7 @@ pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Re
         pool,
         scores_path: "/var/lib/agentforge/agent_scores.json".into(),
         tx: tx.clone(),
+        zentao_cache: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/root/agentforge-rs/static".into());
@@ -338,6 +462,7 @@ pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Re
         .route("/api/scores", get(scores_api))
         .route("/api/agent/:id/traces", get(agent_traces))
         .route("/api/queues", get(queues_api))
+        .route("/api/zentao/stats", get(zentao_stats_api))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
         .layer(CorsLayer::permissive())
