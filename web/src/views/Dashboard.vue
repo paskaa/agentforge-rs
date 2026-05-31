@@ -15,7 +15,7 @@
       <div class="stat-card"><div class="stat-value">{{ stats.total || 0 }}</div><div class="stat-label">活跃 Bug</div></div>
       <div class="stat-card success"><div class="stat-value">{{ stats.fixed_today || 0 }}</div><div class="stat-label">今日修复</div></div>
       <div class="stat-card warning"><div class="stat-value">{{ stats.running || 0 }}</div><div class="stat-label">运行 Agent</div></div>
-      <div class="stat-card info"><div class="stat-value">{{ stats.rate || 'N/A' }}</div><div class="stat-label">总成功率</div></div>
+      <div class="stat-card info"><div class="stat-value">{{ stats.rate || 'N/A' }}</div><div class="stat-label">今日成功率</div></div>
     </div>
 
     <!-- Agent cards -->

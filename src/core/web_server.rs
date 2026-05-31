@@ -183,12 +183,17 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 
     // Stats
     if let Some(ref pool) = s.pool {
-        if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traces WHERE event LIKE 'fix%'")
-            .fetch_one(pool).await { r.stats.total = v; }
-        let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event = 'fix_done' AND status = 'ok'")
-            .fetch_one(pool).await.unwrap_or(0);
-        let tot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event = 'fix_done'")
-            .fetch_one(pool).await.unwrap_or(0);
+        // 今日活跃 Bug 数（fix_start）
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today_pattern = format!("{}%", today);
+        if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traces WHERE event = 'fix_start' AND ts LIKE ?1")
+            .bind(&today_pattern).fetch_one(pool).await { r.stats.total = v; }
+        // 今日成功修复数
+        let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event = 'fix_done' AND status = 'ok' AND ts LIKE ?1")
+            .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
+        // 今日总完成数
+        let tot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event = 'fix_done' AND ts LIKE ?1")
+            .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
         r.stats.fixed_today = ok;
         r.stats.rate = if tot > 0 { format!("{:.0}%", ok as f64 / tot as f64 * 100.0) } else { "N/A".into() };
 
