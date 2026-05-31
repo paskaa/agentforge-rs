@@ -4,9 +4,9 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
-    port: 3100,
+    port: 18081,
     proxy: {
-      '/api': 'http://127.0.0.1:3101'
+      '/api': 'http://127.0.0.1:18081'
     }
   },
   build: {

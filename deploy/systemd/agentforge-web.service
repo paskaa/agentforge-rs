@@ -8,7 +8,7 @@ User=root
 WorkingDirectory=/root/agentforge-rs
 Environment=STATIC_DIR=/root/agentforge-rs/static
 Environment=RUST_LOG=info
-ExecStart=/usr/local/bin/agentforge web --port 3100
+ExecStart=/usr/local/bin/agentforge web --port 18081
 Restart=always
 RestartSec=5
 
