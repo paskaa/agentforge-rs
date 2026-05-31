@@ -1,0 +1,27 @@
+{
+  "providers": [
+    {
+      "id": "mimo",
+      "shortcut": "mm",
+      "displayName": "MiMo V2.5 (token-plan)",
+      "baseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+      "envKey": "MIMO_API_KEY",
+      "defaultModel": "mimo-v2.5",
+      "wireApi": "chat",
+      "models": [
+        {
+          "id": "mimo-v2.5",
+          "contextWindow": 1000000
+        },
+        {
+          "id": "mimo-v2-flash",
+          "contextWindow": 131072
+        },
+        {
+          "id": "mimo-v2-pro",
+          "contextWindow": 131072
+        }
+      ]
+    }
+  ]
+}

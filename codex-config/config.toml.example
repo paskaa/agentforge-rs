@@ -1,0 +1,25 @@
+model_provider = "mimo2codex-deepseek"
+model = "mimo-v2.5"
+model_context_window = 1000000
+language = "zh-CN"
+
+[feedback]
+survey_rate = 0
+
+[model_providers.mimo2codex-deepseek]
+name = "Mimo V2.5 (via mimo2codex)"
+base_url = "http://127.0.0.1:8788/v1"
+wire_api = "responses"
+requires_openai_auth = true
+request_max_retries = 1
+
+# ── Trusted Projects ──
+[projects."/root"]
+trust_level = "trusted"
+
+[projects."/root/.openclaw/workspace/his-repo"]
+trust_level = "trusted"
+
+# ── MCP Servers ──
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"

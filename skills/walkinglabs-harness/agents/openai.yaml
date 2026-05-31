@@ -1,0 +1,3 @@
+interface:
+  display_name: "WalkingLabs Harness"
+  short_description: "Practical harness patterns from walkinglabs course — 5-subsystem model, templates, session continuity"

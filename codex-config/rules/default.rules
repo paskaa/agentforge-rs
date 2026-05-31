@@ -1,0 +1,3 @@
+# ── Prefix Rules ──
+# Add your allowed command patterns here
+# prefix_rule(pattern=["/bin/bash", "-lc", "your command here"], decision="allow")

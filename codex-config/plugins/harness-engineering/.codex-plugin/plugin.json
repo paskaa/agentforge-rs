@@ -1,0 +1,27 @@
+{
+  "name": "harness-engineering",
+  "version": "1.1.0",
+  "description": "Harness Engineering 方法论 — 约束设计、闭环测试、持久执行、审查审计、实战模式。",
+  "author": {
+    "name": "Harness Engineering",
+    "url": "https://github.com/harness-engineering"
+  },
+  "license": "MIT",
+  "keywords": [
+    "harness-engineering",
+    "ai-agent",
+    "quality-gates",
+    "constraints",
+    "durable-execution",
+    "code-review",
+    "closed-loop-testing",
+    "session-continuity"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Harness Engineering",
+    "shortDescription": "AI Agent 工作环境设计方法论 — 6 大技能全覆盖",
+    "category": "Coding",
+    "capabilities": ["Read", "Write"]
+  }
+}
