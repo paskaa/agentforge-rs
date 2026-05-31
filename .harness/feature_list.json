@@ -1,6 +1,6 @@
 {
   "project": "agentforge-rs",
-  "last_updated": "2026-05-28",
+  "last_updated": "2026-05-31",
   "rules": {
     "single_active_feature": true,
     "passing_requires_evidence": true,
@@ -129,6 +129,49 @@
         "cargo check ✅, cargo test 33/33 ✅"
       ],
       "notes": "全自动化：修完 → 质量门禁 → 提交推送 → 禅道解决加备注"
+    },
+    {
+      "id": "afrs-006",
+      "priority": 6,
+      "area": "analytics",
+      "title": "L4 量化分析 — 数据驱动优化",
+      "status": "done",
+      "verification": [
+        "analytics.rs: AgentMetrics / FailurePattern / PipelineMetrics 查询",
+        "report.rs: Markdown 报告生成（Pipeline 概览/智能体绩效/失败模式/建议）",
+        "CLI: cargo run -- analytics (JSON 输出)",
+        "CLI: cargo run -- report --output /path/to/report.md",
+        "47 tests passed (含 L4 单元测试)"
+      ],
+      "evidence": [
+        "analytics.rs: 从 SQLite TraceStore 查询成功率/耗时/失败模式 ✅",
+        "report.rs: generate_markdown() + save_report() ✅",
+        "CLI: analytics / report 命令 ✅",
+        "cargo test: test_recommendations_empty_metrics ✅",
+        "cargo test: test_recommendations_low_success ✅"
+      ],
+      "notes": "数据来自 /var/lib/agentforge/traces.db (TraceStore)"
+    },
+    {
+      "id": "afrs-007",
+      "priority": 7,
+      "area": "optimizer",
+      "title": "L5 AI 自主优化 — 自动调整约束/路由/重试",
+      "status": "done",
+      "verification": [
+        "self_optimizer.rs: 失败模式分析 → 生成优化建议",
+        "Agent 评分系统: 按 bug 类型跟踪成功率+耗时",
+        "智能路由: best_agent_for(bug_type) 选最优 agent",
+        "CLI: cargo run -- optimize (分析+建议)",
+        "CLI: cargo run -- scores (评分排名)"
+      ],
+      "evidence": [
+        "self_optimizer.rs: update_scores() + analyze_and_optimize() ✅",
+        "self_optimizer.rs: best_agent_for() 智能路由 ✅",
+        "CLI: optimize / scores 命令 ✅",
+        "cargo test: test_update_scores / test_best_agent_for / test_analyze_empty ✅"
+      ],
+      "notes": "评分持久化到 /var/lib/agentforge/agent_scores.json"
     }
   ]
 }
