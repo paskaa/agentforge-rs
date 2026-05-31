@@ -12,10 +12,10 @@
 
     <!-- Stats row -->
     <div class="stats-grid">
-      <div class="stat-card"><div class="stat-value">{{ stats.total_bugs || 0 }}</div><div class="stat-label">活跃 Bug</div></div>
+      <div class="stat-card"><div class="stat-value">{{ stats.total || 0 }}</div><div class="stat-label">活跃 Bug</div></div>
       <div class="stat-card success"><div class="stat-value">{{ stats.fixed_today || 0 }}</div><div class="stat-label">今日修复</div></div>
-      <div class="stat-card warning"><div class="stat-value">{{ stats.running_agents || 0 }}</div><div class="stat-label">运行 Agent</div></div>
-      <div class="stat-card info"><div class="stat-value">{{ stats.success_rate || 'N/A' }}</div><div class="stat-label">总成功率</div></div>
+      <div class="stat-card warning"><div class="stat-value">{{ stats.running || 0 }}</div><div class="stat-label">运行 Agent</div></div>
+      <div class="stat-card info"><div class="stat-value">{{ stats.rate || 'N/A' }}</div><div class="stat-label">总成功率</div></div>
     </div>
 
     <!-- Agent cards -->
@@ -132,7 +132,7 @@ function connectWs() {
       const msg = JSON.parse(e.data)
       if (msg.event === 'tick') {
         lastTick.value = msg.data.ts
-        stats.value.running_agents = msg.data.agents
+        stats.value.running = msg.data.agents
       } else if (msg.event === 'fix_done') {
         fetchDashboard()
       } else if (msg.event === 'feishu_trigger') {
