@@ -165,6 +165,43 @@ description: "Master methodology for designing AI Agent work environments. Use w
 | 控制不足 | Agent 自由度过高 | 增加检查点和门禁 |
 | 跳过验证 | 直接提交未验证代码 | 门禁自动化，阻塞提交 |
 
+## 🔴 修复质量铁律（零容忍）
+
+### 铁律 A：修前完整获取 Bug 全部信息
+修复任何 bug 前，必须获取禅道上的全部信息：
+- Bug 标题、描述、复现步骤、期望结果 vs 实际结果
+- **所有截图/附件** — 图片中可能包含关键错误信息
+- **所有备注/评论历史** — 可能包含补充信息和复现条件
+- 严重程度、优先级、指派人、关联模块
+- 禁止只看标题就写代码
+
+### 铁律 B：全链路 6 环验证
+每个涉及数据的 bug 必须验证：
+① 前端页面 → ② Controller → ③ Service → ④ Mapper → ⑤ DB/SQL → ⑥ 关联模块
+任一环节不通过 = 阻断提交
+
+### 铁律 C：测试完整严肃
+- 编译验证：mvn compile / vue-tsc --noEmit 必须 0 error
+- 单元测试：mvn test / npm run test:run 全部通过
+- Playwright 回归：运行 @bug{id} 标签测试
+- 全链路手动验证：按禅道复现步骤实际操作
+- 测试环境必须就绪（node_modules/dev server/DB）
+
+### 铁律 D：已有 commit 也必须验证
+develop 上有 commit ≠ bug 已修好。必须：
+- git show 检查 commit 实际改了什么
+- 重新运行测试验证
+- 检查禅道备注是否有遗漏信息
+- 只有通过完整 6 环验证才能标记"已修复"
+
+### 铁律 E：修复备注必须包含完整证据
+commit message 和禅道备注必须包含：
+1. 根因分析（具体到文件/函数/行）
+2. 修复方案（改了什么、为什么）
+3. 验证结果（编译/测试通过的日志）
+4. 影响范围
+5. 全链路 6 环验证表
+
 ## 📚 相关技能
 
 - `$durable-execution` — 检查点、幂等性、事件溯源
