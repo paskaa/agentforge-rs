@@ -5,6 +5,21 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+/// 归一化 agent_id: 中文名 → pinyin ID
+fn normalize_agent_id(id: &str) -> String {
+    match id {
+        "关羽" => "guanyu".into(),
+        "赵云" => "zhaoyun".into(),
+        "荀彧" => "xunyu".into(),
+        "张飞" => "zhangfei".into(),
+        "华佗" => "huatuo".into(),
+        "陈琳" => "chenlin".into(),
+        "刘备" => "liubei".into(),
+        "诸葛亮" => "zhugeliang".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Agent performance metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMetrics {
@@ -88,8 +103,22 @@ impl Analytics {
         .await
         .unwrap_or_default();
 
-        rows.into_iter()
-            .map(|(agent_id, total, success, fail, avg_dur)| {
+        // 归一化 agent_id 并合并同一智能体的数据
+        let mut merged: std::collections::HashMap<String, (i64, i64, i64, f64)> = std::collections::HashMap::new();
+        for (agent_id, total, success, fail, avg_dur) in rows {
+            let normalized = normalize_agent_id(&agent_id);
+            let entry = merged.entry(normalized).or_insert((0, 0, 0, 0.0));
+            entry.0 += total;
+            entry.1 += success;
+            entry.2 += fail;
+            let old_total = entry.0 - total;
+            if entry.0 > 0 {
+                entry.3 = (entry.3 * old_total as f64 + avg_dur * total as f64) / entry.0 as f64;
+            }
+        }
+
+        merged.into_iter()
+            .map(|(agent_id, (total, success, fail, avg_dur))| {
                 let success_rate = if total > 0 {
                     success as f64 / total as f64 * 100.0
                 } else {
@@ -105,7 +134,7 @@ impl Analytics {
                     avg_duration_s: avg_dur / 1000.0,
                 }
             })
-            .collect()
+            .collect::<Vec<_>>()
     }
 
     /// Get failure patterns grouped by error category.
@@ -130,6 +159,7 @@ impl Analytics {
         // Merge by error category
         let mut patterns: Vec<FailurePattern> = Vec::new();
         for (cat, cnt, agent, task) in rows {
+            let agent = normalize_agent_id(&agent);
             if let Some(existing) = patterns.iter_mut().find(|p| p.error_category == cat) {
                 existing.count += cnt;
                 if !existing.agents.contains(&agent) {

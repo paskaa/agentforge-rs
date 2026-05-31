@@ -45,6 +45,7 @@ struct ZentaoBug {
     status: String,
     assigned_to: String,
     severity: String,
+    url: String,
 }
 
 #[derive(Serialize, Default)]
@@ -352,12 +353,14 @@ async fn fetch_zentao_stats(_pool: &Option<SqlitePool>) -> ZentaoStats {
             if a.is_object() { a.get("name").or(a.get("account")).and_then(|v| v.as_str()).map(String::from) }
             else { a.as_str().map(String::from) }
         }).unwrap_or_default();
+        let bug_id = b.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         ZentaoBug {
-            id: b.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+            id: bug_id,
             title: b.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             status: b.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             assigned_to: assignee,
             severity: b.get("severity").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            url: format!("https://zentao.gentronhealth.com/bug-view-{}.html", bug_id),
         }
     }).collect();
 

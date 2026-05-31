@@ -6,7 +6,12 @@
     </div>
     <el-table :data="paginated" stripe style="width:100%" :default-sort="{ prop: 'id', order: 'descending' }">
       <el-table-column prop="id" label="#" width="80" sortable>
-        <template #default="{ row }"><span style="font-family:monospace;color:#60a5fa">#{{ row.id }}</span></template>
+        <template #default="{ row }">
+          <a :href="row.url" target="_blank" rel="noopener" class="bug-link">
+            #{{ row.id }}
+            <el-icon style="font-size:10px;margin-left:2px"><Link /></el-icon>
+          </a>
+        </template>
       </el-table-column>
       <el-table-column prop="title" label="标题" min-width="300" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="100">
@@ -30,6 +35,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
+import { Link } from '@element-plus/icons-vue'
 
 const props = defineProps({ bugs: { type: Array, default: () => [] } })
 const search = ref('')
@@ -49,3 +55,11 @@ const paginated = computed(() => {
 function statusType(s) { return { active: 'warning', resolved: 'success', closed: 'info' }[s] || 'info' }
 function severityType(s) { return parseInt(s) >= 4 ? 'danger' : parseInt(s) >= 3 ? 'warning' : 'info' }
 </script>
+
+<style scoped>
+.bug-link {
+  font-family: monospace; color: #60a5fa; text-decoration: none;
+  display: inline-flex; align-items: center; transition: color 0.15s;
+}
+.bug-link:hover { color: #93c5fd; text-decoration: underline; }
+</style>
