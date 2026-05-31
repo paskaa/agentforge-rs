@@ -48,6 +48,8 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
 - **Git Worktree Isolation** — Each agent works in its own worktree, no conflicts
 - **Dead Letter Queue** — Failed tasks preserved for retry
 - **Full-Chain Fix** — Traces data flow across frontend → controller → service → mapper → DB
+- **L4 Analytics** — Data-driven optimization: success rates, failure patterns, agent scoring
+- **L5 Self-Optimizer** — AI-driven auto-tuning: constraint adjustment, smart routing, retry strategy
 
 ## 🏗️ Architecture
 
@@ -137,6 +139,10 @@ All configuration lives in `config/agentforge.yaml` (git-ignored). See `config/a
 | `pipeline --max-bugs N` | Run the bug-fixing pipeline (N bugs max) |
 | `executor --agent <name>` | Start an agent executor |
 | `query-bug --bug-id N` | Query bug details from Zentao |
+| `analytics` | L4: Generate metrics JSON from TraceStore |
+| `report` | L4: Generate Markdown analytics report |
+| `optimize` | L5: Run self-optimizer — analyze + recommend |
+| `scores` | L5: Show agent performance scores |
 
 ## 🤖 Agent System
 
@@ -215,6 +221,8 @@ AgentForge-RS 是一个用 Rust 编写的**多智能体自动化 Bug 修复框�
 - **Git Worktree 隔离** — 每个智能体独立工作树，互不冲突
 - **死信队列** — 失败任务持久化，支持重试
 - **全链路修复** — 追踪前端 → Controller → Service → Mapper → DB 数据流
+- **L4 量化分析** — 数据驱动优化：成功率、失败模式、智能体评分
+- **L5 自主优化** — AI 自动调优：约束调整、智能路由、重试策略
 
 ## 🏗️ 架构
 
@@ -302,6 +310,10 @@ cargo run -- query-bug --bug-id 630
 | `pipeline --max-bugs N` | 运行 Bug 修复流水线（最多 N 个） |
 | `executor --agent <name>` | 启动智能体执行器 |
 | `query-bug --bug-id N` | 查询禅道 Bug 详情 |
+| `analytics` | L4: Generate metrics JSON from TraceStore |
+| `report` | L4: Generate Markdown analytics report |
+| `optimize` | L5: Run self-optimizer — analyze + recommend |
+| `scores` | L5: Show agent performance scores |
 
 ## 🤖 智能体系统
 
@@ -338,6 +350,8 @@ AgentForge-RSはRustで構築された**マルチエージェント自動バグ�
 - **Git Worktree分離** — 各エージェントが独立したWorktreeで作業、競合なし
 - **デッドレターキュー** — 失敗したタスクの永続化とリトライ対応
 - **フルチェーン修正** — フロントエンド → Controller → Service → Mapper → DBのデータフロー追跡
+- **L4 分析** — データドリブン最適化：成功率、失敗パターン、エージェントスコアリング
+- **L5 自己最適化** — AI自律最適化：制約調整、スマートルーティング、リトライ戦略
 
 ## 🏗️ アーキテクチャ
 
@@ -421,6 +435,10 @@ cargo run -- query-bug --bug-id 630
 | `pipeline --max-bugs N` | バグ修正パイプライン実行（最大N件） |
 | `executor --agent <name>` | エージェント実行器を起動 |
 | `query-bug --bug-id N` | Zentaoバグ詳細を照会 |
+| `analytics` | L4: Generate metrics JSON from TraceStore |
+| `report` | L4: Generate Markdown analytics report |
+| `optimize` | L5: Run self-optimizer — analyze + recommend |
+| `scores` | L5: Show agent performance scores |
 
 ## 🤖 エージェントシステム
 
