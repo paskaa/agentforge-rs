@@ -1,11 +1,15 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
+import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
 import Dashboard from './views/Dashboard.vue'
 import Analytics from './views/Analytics.vue'
 import Agents from './views/Agents.vue'
 import AgentDetail from './views/AgentDetail.vue'
 import Queues from './views/Queues.vue'
+import BugList from './views/BugList.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -15,7 +19,14 @@ const router = createRouter({
     { path: '/agents', component: Agents },
     { path: '/queues', component: Queues },
     { path: '/agent/:id', component: AgentDetail, props: true },
+    { path: '/bugs/:filter', component: BugList, props: true },
   ]
 })
 
-createApp(App).use(router).mount('#app')
+const app = createApp(App)
+app.use(router)
+app.use(ElementPlus, { locale: { el: { pagination: { goto: '前往', pagesize: '条/页', total: '共 {total} 条' } } } })
+for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+  app.component(key, component)
+}
+app.mount('#app')
