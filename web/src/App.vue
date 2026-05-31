@@ -15,6 +15,9 @@
       <router-link to="/agents" class="nav-item" active-class="active">
         <span>🤖</span> 智能体
       </router-link>
+      <router-link to="/queues" class="nav-item" active-class="active">
+        <span>📋</span> 队列
+      </router-link>
       <div class="nav-footer">
         <div class="status-dot" :class="connected ? 'online' : 'offline'"></div>
         <span>{{ connected ? '已连接' : '断开' }}</span>

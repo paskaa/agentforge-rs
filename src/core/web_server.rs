@@ -218,6 +218,45 @@ async fn scores_api(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({"scores": opt.scores.values().collect::<Vec<_>>()}))
 }
 
+// ── Agent traces API ──
+
+#[derive(Serialize)]
+struct TraceRow { ts: String, event: String, task_id: String, message: String, status: String, duration_ms: i64 }
+
+async fn agent_traces(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(ref pool) = s.pool {
+        if let Ok(rows) = sqlx::query_as::<_, (String,String,String,String,String,i64)>(
+            "SELECT COALESCE(ts,''), event, COALESCE(task_id,''), COALESCE(message,''), COALESCE(status,''), COALESCE(duration_ms,0) FROM traces WHERE agent_id = ?1 ORDER BY ts DESC LIMIT 50"
+        ).bind(&agent_id).fetch_all(pool).await {
+            let traces: Vec<TraceRow> = rows.into_iter().map(|(ts,event,task_id,message,status,dur)|
+                TraceRow { ts, event, task_id, message: message.chars().take(200).collect(), status, duration_ms: dur }
+            ).collect();
+            return Json(serde_json::json!({"agent_id": agent_id, "traces": traces}));
+        }
+    }
+    Json(serde_json::json!({"agent_id": agent_id, "traces": []}))
+}
+
+// ── Queues API ──
+
+#[derive(Serialize)]
+struct QueueApiItem { agent: String, queue_len: i64, items: Vec<QueueItem> }
+
+async fn queues_api() -> impl IntoResponse {
+    let agent_ids = ["guanyu", "zhaoyun", "xunyu", "zhangfei", "huatuo", "chenlin", "liubei", "zhugeliang"];
+    let mut queues: Vec<QueueApiItem> = Vec::new();
+    for id in &agent_ids {
+        let queue = format!("agent-work-queue:fix:{}", id);
+        let len = redis_queue_len(&queue);
+        let items = if len > 0 { redis_queue_items(&queue, 10) } else { vec![] };
+        queues.push(QueueApiItem { agent: id.to_string(), queue_len: len, items });
+    }
+    Json(queues)
+}
+
 // ── WebSocket ──
 
 async fn ws_handler(
@@ -292,6 +331,8 @@ pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Re
         .route("/api/dashboard", get(dashboard))
         .route("/api/analytics", get(analytics_api))
         .route("/api/scores", get(scores_api))
+        .route("/api/agent/:id/traces", get(agent_traces))
+        .route("/api/queues", get(queues_api))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(&static_dir).append_index_html_on_directories(true))
         .layer(CorsLayer::permissive())

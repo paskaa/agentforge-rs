@@ -22,7 +22,7 @@
     <div class="section">
       <h2>🤖 智能体状态</h2>
       <div class="agent-grid">
-        <div v-for="a in agents" :key="a.id" class="agent-card" :class="a.status">
+        <router-link v-for="a in agents" :key="a.id" :to="'/agent/' + a.id" class="agent-card" :class="a.status" tag="div">
           <div class="agent-head">
             <span class="agent-icon">{{ a.icon }}</span>
             <span class="agent-name">{{ a.name }}</span>
@@ -38,7 +38,7 @@
             <span>{{ a.avg_s }}</span>
           </div>
           <div class="bar"><div class="bar-fill" :style="{width: a.rate}"></div></div>
-        </div>
+        </router-link>
       </div>
     </div>
 
@@ -177,7 +177,7 @@ onUnmounted(() => {
 .section h2 { font-size: 15px; margin-bottom: 12px; color: #cbd5e1; }
 
 .agent-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.agent-card { background: #1e293b; border-radius: 10px; padding: 14px; border: 1px solid #334155; transition: all 0.2s; }
+.agent-card { background: #1e293b; border-radius: 10px; padding: 14px; border: 1px solid #334155; transition: all 0.2s; cursor: pointer; text-decoration: none; color: inherit; display: block; }
 .agent-card.working { border-color: #22c55e; box-shadow: 0 0 12px rgba(34,197,94,0.1); }
 .agent-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .agent-icon { font-size: 18px; }
