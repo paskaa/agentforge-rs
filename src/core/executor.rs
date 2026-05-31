@@ -446,30 +446,39 @@ impl AgentExecutor {
             }
             let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
 
-            // ── 全链路验证（编译 + 测试 + Playwright + 数据库 + 接口）──
-            let verification = super::verification::run_full_verification(&an, &bid, &m, 
-                if an == "zhaoyun" { 
-                    "/tmp/agentforge-worktrees/zhaoyun/openhis-ui-vue3" 
-                } else { 
-                    "/tmp/agentforge-worktrees/guanyu/openhis-server-new" 
-                });
-            
-            tracing::info!("[{}] Bug #{} 验证结果: {} ({}ms)", an, bid, verification.summary, verification.total_ms);
-            let verify_detail = serde_json::to_string(&verification).unwrap_or_default();
-            tr.log(&an, "verification", Some(&format!("Bug#{}", bid)), 
-                Some(&verification.summary), Some("verification"), None, 
-                Some(verification.total_ms as i64), 
-                Some(if verification.all_passed {"ok"} else {"failed"}),
-                Some(&verify_detail)).await;
-            
-            // 验证失败 → 不进 pipeline，标记为失败
-            if !verification.all_passed && r.success {
-                tracing::warn!("[{}] Bug #{} 编译/测试通过但全链路验证失败: {}", an, bid, verification.summary);
-                let _: redis::RedisResult<()> = redis_clone.sadd(format!("agent-failed-bugs:{}", an), &bid).await;
-                let queue_key = format!("agent-work-queue:fix:{}", an);
-                let _: redis::RedisResult<i64> = redis_clone.lrem(&queue_key, 1, &m).await;
-                return;
-            }
+            // ── 全链路验证（异步非阻塞）──
+            // 铁律 20: 验证不通过禁止进 Pipeline
+            // 但验证本身不阻塞 executor，spawn 到独立 task
+            let an_v = an.clone();
+            let bid_v = bid.clone();
+            let m_v = m.clone();
+            let tr_v = tr.clone();
+            let mut redis_v = redis_clone.clone();
+            let work_dir = if an == "zhaoyun" { 
+                "/tmp/agentforge-worktrees/zhaoyun/openhis-ui-vue3".to_string()
+            } else { 
+                "/tmp/agentforge-worktrees/guanyu/openhis-server-new".to_string()
+            };
+            tokio::spawn(async move {
+                tracing::info!("[{}] Bug #{} 开始全链路验证...", an_v, bid_v);
+                let verification = super::verification::run_full_verification(&an_v, &bid_v, &m_v, &work_dir);
+                tracing::info!("[{}] Bug #{} 验证结果: {} ({}ms)", an_v, bid_v, verification.summary, verification.total_ms);
+                let verify_detail = serde_json::to_string(&verification).unwrap_or_default();
+                tr_v.log(&an_v, "verification", Some(&format!("Bug#{}", bid_v)), 
+                    Some(&verification.summary), Some("verification"), None, 
+                    Some(verification.total_ms as i64), 
+                    Some(if verification.all_passed {"ok"} else {"failed"}),
+                    Some(&verify_detail)).await;
+                // Publish verification result to WebSocket
+                tr_v.publish_trace_for_ws(&an_v, "verification", &format!("Bug#{}", bid_v),
+                    &verification.summary, if verification.all_passed {"ok"} else {"failed"}, 
+                    verification.total_ms as i64).await;
+                // 验证失败 → 加入失败集合（不阻塞 executor）
+                if !verification.all_passed {
+                    tracing::warn!("[{}] Bug #{} 全链路验证失败: {}", an_v, bid_v, verification.summary);
+                    let _: redis::RedisResult<()> = redis_v.sadd(format!("agent-failed-bugs:{}", an_v), &bid_v).await;
+                }
+            });
 
             // L5: 自动评分 — 更新 agent 成功率和耗时
             {
