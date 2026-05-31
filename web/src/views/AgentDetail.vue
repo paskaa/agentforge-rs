@@ -81,7 +81,7 @@
             <el-tag :type="log.status === 'ok' ? 'success' : 'danger'" size="small" effect="dark">{{ log.status }}</el-tag>
           </span>
           <span class="log-dur" v-if="log.duration_ms > 0">{{ (log.duration_ms / 1000).toFixed(0) }}s</span>
-          <span class="log-msg">{{ log.message }}</span>
+          <span class="log-msg" :title="log.message">{{ log.message }}</span>
         </div>
         <div v-if="realtimeLogs.length === 0" style="text-align:center;color:#475569;padding:20px">等待实时数据...</div>
       </div>
@@ -223,12 +223,39 @@ onUnmounted(() => { clearInterval(pollTimer); if (ws) ws.close() })
 <style scoped>
 .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #22c55e; animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-.log-container { max-height: 300px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 12px; background: #0f172a; border-radius: 6px; padding: 8px; }
-.log-line { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid rgba(51,65,85,0.3); }
-.log-time { color: #475569; min-width: 70px; }
-.log-tag { min-width: 60px; text-align: center; }
-.log-bug { min-width: 50px; }
-.log-status { min-width: 40px; }
-.log-dur { color: #94a3b8; min-width: 50px; }
-.log-msg { color: #64748b; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-container {
+  max-height: 400px;
+  min-height: 120px;
+  overflow-y: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  background: #0f172a;
+  border-radius: 6px;
+  padding: 8px 12px;
+  border: 1px solid #1e293b;
+}
+.log-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(51,65,85,0.3);
+  min-height: 24px;
+  flex-wrap: wrap;
+}
+.log-time { color: #94a3b8; min-width: 70px; font-size: 11px; white-space: nowrap; }
+.log-tag { min-width: 60px; text-align: center; flex-shrink: 0; }
+.log-bug { min-width: 50px; flex-shrink: 0; }
+.log-status { flex-shrink: 0; }
+.log-dur { color: #94a3b8; min-width: 50px; flex-shrink: 0; }
+.log-msg {
+  color: #cbd5e1;
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  white-space: pre-wrap;
+  max-height: 60px;
+  overflow-y: auto;
+  line-height: 1.4;
+}
 </style>
