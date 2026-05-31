@@ -11,3 +11,7 @@ pub mod tool_executor;
 pub mod trace;
 pub mod sql_validator;
 pub mod zentao;
+pub mod analytics;
+pub mod report;
+pub mod self_optimizer;
+

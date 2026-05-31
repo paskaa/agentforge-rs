@@ -70,6 +70,17 @@ enum Cli {
         #[arg(long, default_value = "/root/.openclaw/workspace/his-repo")]
         repo: String,
     },
+    /// L4: Run analytics — generate metrics from TraceStore
+    Analytics,
+    /// L4: Generate Markdown report
+    Report {
+        #[arg(long, default_value = "/var/lib/agentforge/report.md")]
+        output: String,
+    },
+    /// L5: Run self-optimizer — analyze failures and generate optimizations
+    Optimize,
+    /// L5: Show agent scores for smart routing
+    Scores,
 }
 
 #[tokio::main]
@@ -133,6 +144,80 @@ async fn main() -> anyhow::Result<()> {
             let results = sql_validator::validate_all_mappers(&repo, &pg);
             let report = sql_validator::generate_scan_report(&results);
             println!("{}", report);
+        }
+
+        // ── L4 Analytics ──
+        Cli::Analytics => {
+            let pool = sqlx::SqlitePool::connect("sqlite:///var/lib/agentforge/traces.db?mode=ro").await?;
+            let analytics = agentforge::core::analytics::Analytics::new(pool);
+            let report = analytics.generate_report().await;
+            let json = serde_json::to_string_pretty(&report)?;
+            println!("{}", json);
+        }
+        Cli::Report { output } => {
+            let pool = sqlx::SqlitePool::connect("sqlite:///var/lib/agentforge/traces.db?mode=ro").await?;
+            let analytics = agentforge::core::analytics::Analytics::new(pool);
+            let report = analytics.generate_report().await;
+            agentforge::core::report::save_report(&report, &output)?;
+            println!("✅ 报告已生成: {}", output);
+            // Also print summary
+            let md = agentforge::core::report::generate_markdown(&report);
+            println!("{}", md);
+        }
+
+        // ── L5 Self-Optimizer ──
+        Cli::Optimize => {
+            let pool = sqlx::SqlitePool::connect("sqlite:///var/lib/agentforge/traces.db?mode=ro").await?;
+            let analytics = agentforge::core::analytics::Analytics::new(pool);
+            let report = analytics.generate_report().await;
+
+            let scores_path = "/var/lib/agentforge/agent_scores.json";
+            let mut optimizer = agentforge::core::self_optimizer::SelfOptimizer::load(scores_path);
+
+            // Update scores from report
+            for am in &report.agent_metrics {
+                for bug_type in ["backend", "frontend", "database", "general"] {
+                    let success = am.success_rate > 50.0;
+                    optimizer.update_scores(&am.agent_id, bug_type, success, am.avg_duration_s);
+                }
+            }
+
+            // Generate optimization actions
+            let actions = optimizer.analyze_and_optimize(&report.agent_metrics, &report.failure_patterns);
+
+            println!("🔧 L5 自优化分析");
+            println!("═══════════════════════════════");
+            if actions.is_empty() {
+                println!("✅ 无需优化调整");
+            } else {
+                for action in &actions {
+                    println!("
+📋 {} → {}", action.action_type, action.target_agent);
+                    println!("   原因: {}", action.reason);
+                    println!("   建议: {}", action.change);
+                    println!("   置信度: {:.0}%", action.confidence * 100.0);
+                }
+            }
+
+            // Save updated scores
+            optimizer.save(scores_path)?;
+            println!("
+✅ 分数已更新: {}", scores_path);
+        }
+        Cli::Scores => {
+            let scores_path = "/var/lib/agentforge/agent_scores.json";
+            let optimizer = agentforge::core::self_optimizer::SelfOptimizer::load(scores_path);
+            let mut scores: Vec<_> = optimizer.scores.values().collect();
+            scores.sort_by(|a, b| b.overall_score.partial_cmp(&a.overall_score).unwrap_or(std::cmp::Ordering::Equal));
+
+            println!("🏆 智能体评分排名");
+            println!("═══════════════════════════════");
+            println!("{:<12} {:>8} {:>10} {:>8}", "Agent", "总分", "成功率", "耗时");
+            println!("───────────────────────────────");
+            for s in scores {
+                println!("{:<12} {:>8.1} {:>9.0}% {:>7.0}s",
+                    s.agent_id, s.overall_score, s.success_rate, s.avg_duration_s);
+            }
         }
     }
 
