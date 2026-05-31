@@ -331,6 +331,11 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
         Ok(bugs) => {
             for b in bugs {
                 if b.id == 613 { continue; } // skip already fixed
+                // 铁律 18: 跳过已解决/已关闭的 bug
+                if b.status.as_deref() == Some("resolved") || b.status.as_deref() == Some("closed") {
+                    println!("⏭️   Bug #{} 状态={}，跳过", b.id, b.status.as_deref().unwrap_or("?"));
+                    continue;
+                }
                 // Categorize by area based on title/module
                 let combined = format!("{:?} {:?}", b.title, b.moduleTitle).to_lowercase();
                 let fixer = if combined.contains("报错") || combined.contains("保存") || combined.contains("接口") || combined.contains("sql") || combined.contains("数据") {
@@ -379,16 +384,15 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
         });
 
         let queue = format!("agent-work-queue:fix:{}", fixer);
-        // 去重：检查该 bug 是否已在队列中或正在被 agent 处理
-        let existing: Vec<String> = conn.lrange(&queue, 0, -1).await.unwrap_or_default();
-        let already_queued = existing.iter().any(|s| s.contains(&format!("Bug #{}", bug_id)));
-        let lock_key = format!("codex_lock:{}", fixer);
-        let lock_exists: bool = conn.exists(&lock_key).await.unwrap_or(false);
-        if already_queued || lock_exists {
-            let reason = if lock_exists { "agent 正在处理中" } else { "已在队列中" };
-            println!("⏭️   Bug #{} {}，跳过", bug_id, reason);
+        // ── 铁律 18: 入列前三重检查 ──
+        let (skip, reason) = crate::core::pipeline::should_skip_bug(
+            bug_id, fixer, &mut conn, &zentao_client,
+        ).await;
+        if skip {
+            println!("⏭️   Bug #{} 跳过: {}", bug_id, reason);
         } else {
             let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
+            println!("📥  Bug #{} 已入列 → {}", bug_id, fixer);
         }
 
         // 轮询等待修复结果（最大等待 30 分钟）

@@ -330,6 +330,15 @@ impl AgentExecutor {
     async fn handle_fix_task(&self, msg: &str) {
         let bug_id = pipeline::parse_bugs_from_message(msg).first().map(|(b,_)| b.clone()).unwrap_or_default();
         if bug_id.is_empty() { return; }
+        // ── 铁律 19: fix_start 去重 — 检查是否已在处理 ──
+        let dedup_key = format!("fix_active:{}:{}", self.agent_id, bug_id);
+        let already_active: bool = self.redis.clone().exists(&dedup_key).await.unwrap_or(false);
+        if already_active {
+            tracing::warn!("[{}] Bug#{} 已在处理中（fix_active 存在），跳过重复 fix_start", self.agent_id, bug_id);
+            return;
+        }
+        // 设置活跃标记（TTL 30 分钟）
+        let _: redis::RedisResult<()> = self.redis.clone().set_ex(&dedup_key, "1", 1800).await;
         self.traces.log(&self.agent_id, "fix_start", Some(&format!("Bug#{}", bug_id)), Some(msg), Some("codex"), None, None, Some("pending"), None).await;
         self.publish_trace(&self.agent_id, "fix_start", &format!("Bug#{}", bug_id), msg, "pending", 0).await;
         // Try to acquire per-agent lock

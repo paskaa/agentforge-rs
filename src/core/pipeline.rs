@@ -3,6 +3,7 @@
 //! Each handler receives context and a task, processes it, and may emit follow-up tasks.
 
 
+use redis::AsyncCommands;
 /// Known human accounts — their bugs get fixed but status/assignment unchanged.
 pub const HUMAN_ACCOUNTS: &[&str] = &[
     "chenxj", "sjjh", "admin", "doctor1", "ssshs1",
@@ -120,6 +121,59 @@ pub fn build_fix_task(bid: &str, title: &str, fixer: &str) -> serde_json::Value 
         "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
     })
 }
+
+
+/// Check if a bug should be skipped before enqueuing.
+/// Returns (should_skip, reason).
+pub async fn should_skip_bug(
+    bug_id: &str,
+    fixer: &str,
+    redis_conn: &mut redis::aio::MultiplexedConnection,
+    zentao_client: &crate::core::zentao::ZentaoClient,
+) -> (bool, String) {
+    // ── Check 1: Zentao status (resolved/closed = skip) ──
+    match zentao_client.get_bug(bug_id).await {
+        Ok(bug) => {
+            if bug.status == "resolved" || bug.status == "closed" {
+                return (true, format!("禅道状态已={}", bug.status));
+            }
+        }
+        Err(e) => {
+            tracing::warn!("[dedup] Failed to check Zentao status for Bug#{}: {}", bug_id, e);
+            // Don't skip on API error — might be a transient failure
+        }
+    }
+
+    // ── Check 2: develop branch already has fix commit ──
+    let output = std::process::Command::new("git")
+        .args(["log", "origin/develop", "--grep", &format!("Bug#{}", bug_id), "--oneline", "-1"])
+        .current_dir("/root/.openclaw/workspace/his-repo")
+        .output();
+    if let Ok(o) = output {
+        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+        if !stdout.trim().is_empty() {
+            return (true, format!("develop 已有 commit: {}", stdout.trim()));
+        }
+    }
+
+    // ── Check 3: Redis lock (agent already processing) ──
+    let lock_key = format!("codex_lock:{}", fixer);
+    let lock_exists: bool = redis_conn.clone().exists(&lock_key).await.unwrap_or(false);
+    if lock_exists {
+        return (true, format!("agent {} 正在处理中", fixer));
+    }
+
+    // ── Check 4: Already in queue (dedup within queue) ──
+    let queue = format!("agent-work-queue:fix:{}", fixer);
+    let existing: Vec<String> = redis_conn.clone().lrange(&queue, 0, -1).await.unwrap_or_default();
+    let bug_marker = format!("Bug #{}", bug_id);
+    if existing.iter().any(|s| s.contains(&bug_marker)) {
+        return (true, "已在队列中".to_string());
+    }
+
+    (false, String::new())
+}
+
 
 #[cfg(test)]
 mod tests {

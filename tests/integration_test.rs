@@ -84,8 +84,8 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
 
         let store = TraceStore::open(&tmp).await.unwrap();
-        store.log("zhaoyun", "task_start", Some("Bug#999"), Some("test message"), None, None, None, None).await;
-        store.log("zhaoyun", "task_done", Some("Bug#999"), None, None, None, Some(2450), Some("ok")).await;
+        store.log("zhaoyun", "task_start", Some("Bug#999"), Some("test message"), None, None, None, None, None).await;
+        store.log("zhaoyun", "task_done", Some("Bug#999"), None, None, None, Some(2450), Some("ok"), None).await;
 
         let traces = store.query(10).await;
         assert_eq!(traces.len(), 2);
