@@ -71,7 +71,8 @@ onMounted(async () => {
     const d = await r.json()
     scores.value = (d.scores || []).sort((a, b) => (b.overall_score || 0) - (a.overall_score || 0))
     for (const s of scores.value) {
-      const a = agentData.find(x => x.id === s.agent_id)
+      const normalizedId = agentIdMap[s.agent_id] || s.agent_id
+      const a = agentData.find(x => x.id === normalizedId)
       if (a) a.score = s.overall_score
     }
   } catch {}
