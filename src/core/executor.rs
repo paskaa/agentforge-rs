@@ -4,7 +4,7 @@
 use crate::config::{AgentConfig, Config};
 use crate::core::llm::LlmClient;
 use crate::core::pipeline::{self, route_bug};
-use crate::core::subagent;
+use crate::core::subagent::{self, CodexResult};
 use crate::core::trace::TraceStore;
 use crate::network::feishu::FeishuClient;
 use redis::AsyncCommands;
@@ -32,6 +32,22 @@ const AGENT_NAMES: &[(&str, &str)] = &[
 const FIXERS: &[&str] = &["zhugeliang","liubei","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
 const ALL_AGENTS: &[&str] = &["zhugeliang","liubei","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
 
+const MAX_FIX_RETRIES: u32 = 3;
+const RETRY_BASE_DELAY_MS: u64 = 5000; // 5s base, doubles each retry
+
+/// Check if a codex failure is transient (model API error, timeout, etc.) and worth retrying.
+fn is_transient_error(stderr: &str, stdout: &str) -> bool {
+    let combined = format!("{} {}", stderr, stdout).to_lowercase();
+    // Model API errors
+    combined.contains("rate limit") || combined.contains("429") || combined.contains("503")
+        || combined.contains("timeout") || combined.contains("timed out")
+        || combined.contains("connection refused") || combined.contains("eof")
+        || combined.contains("network") || combined.contains("overloaded")
+        || combined.contains("capacity") || combined.contains("try again")
+        || combined.contains("econnreset") || combined.contains("ehostunreach")
+        || combined.contains("panic") || combined.contains("segfault")
+}
+
 pub struct AgentExecutor {
     pub agent_id: String, pub agent_name: String,
     pub redis: redis::aio::MultiplexedConnection,
@@ -40,6 +56,7 @@ pub struct AgentExecutor {
     pub traces: Arc<TraceStore>,
     fix_stream: String, is_fixer: bool,
     last_coordinator_scan: Instant,
+    last_retry_check: Instant,
     last_stream_id: String,
     zentao_dir: String,
 }
@@ -60,7 +77,7 @@ impl AgentExecutor {
         let feishu = FeishuClient::new(&config.feishu.app_id, &config.feishu.app_secret, &config.feishu.group_chat_id);
         let traces = Arc::new(TraceStore::open(std::path::Path::new("/var/lib/agentforge/traces.db")).await?);
         Ok(Self { agent_id: agent_id.into(), agent_name, redis, redis_sync, llm, feishu, traces, fix_stream, is_fixer,
-            last_coordinator_scan: Instant::now(), last_stream_id: "$".into(),
+            last_coordinator_scan: Instant::now(), last_retry_check: Instant::now(), last_stream_id: "$".into(),
             zentao_dir: "/root/.openclaw/extensions/zentao-token-refresh".into() })
     }
 
@@ -73,6 +90,8 @@ impl AgentExecutor {
                 tracing::info!("[{}] Cleaning up stale lock on startup (TTL={}s)", self.agent_id, ttl);
                 let _: redis::RedisResult<()> = self.redis.clone().del(&lock_key).await;
             }
+            // 启动恢复：检查失败集合中是否有可重试的 bug
+            self.recover_failed_bugs().await;
         }
         tracing::info!("[{}] Started as {} (stream={}, fixer={})", self.agent_id, self.agent_name, self.fix_stream, self.is_fixer);
         // Non-fixer: read from stream without consumer group
@@ -81,6 +100,12 @@ impl AgentExecutor {
             if (self.agent_id == "zhugeliang" || self.agent_id == "liubei")
                 && self.last_coordinator_scan.elapsed() > Duration::from_secs(300)
             { self.last_coordinator_scan = Instant::now(); self.run_coordinator_scan().await; }
+
+            // 定期检查失败 bug 并重新入队（每 10 分钟）
+            if self.is_fixer && self.last_retry_check.elapsed() > Duration::from_secs(600) {
+                self.last_retry_check = Instant::now();
+                self.recover_failed_bugs().await;
+            }
 
 
             // For fixers: check per-agent lock BEFORE consuming — avoid task loss
@@ -152,6 +177,60 @@ impl AgentExecutor {
                 }
                 _ => tracing::debug!("[{}] unhandled source={}", self.agent_id, source),
             }
+        }
+    }
+
+    /// 启动恢复：检查失败集合，将可重试的 bug 重新入队
+    async fn recover_failed_bugs(&mut self) {
+        let failed_key = format!("agent-failed-bugs:{}", self.agent_id);
+        let failed_bugs: Vec<String> = self.redis.clone().smembers(&failed_key).await.unwrap_or_default();
+        if failed_bugs.is_empty() { return; }
+
+        let retry_key_prefix = format!("fix_retry_count:{}", self.agent_id);
+        let mut requeued = 0u32;
+
+        for bid in &failed_bugs {
+            // 检查重试次数（每个 bug 最多重试 2 次）
+            let retry_count: i32 = self.redis.clone()
+                .get(format!("{}:{}", retry_key_prefix, bid))
+                .await.unwrap_or(0);
+            if retry_count >= 2 {
+                tracing::info!("[{}] Bug #{} max retries ({}) reached, skipping", self.agent_id, bid, retry_count);
+                continue;
+            }
+
+            // 检查 bug 是否仍然活跃（未被其他 agent 修复）
+            let lock_key = format!("codex_lock:{}", self.agent_id);
+            let lock_exists: bool = self.redis.clone().exists(&lock_key).await.unwrap_or(false);
+            if lock_exists { continue; } // 正在处理中，跳过
+
+            // 重新入队
+            let task = serde_json::json!({
+                "agent_id": self.agent_id,
+                "message": format!("请修复 Bug #{}（重试）", bid),
+                "source": "retry_recover",
+                "sender_id": "system",
+                "chat_id": "",
+                "is_dm": "true",
+                "msg_id": format!("retry-{}-{}-{}", bid, self.agent_id, chrono::Utc::now().timestamp()),
+                "timestamp": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            });
+            let queue = format!("agent-work-queue:fix:{}", self.agent_id);
+            let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, task.to_string()).await;
+            // 增加重试计数
+            let _: redis::RedisResult<i32> = self.redis.clone()
+                .incr(format!("{}:{}", retry_key_prefix, bid), 1).await;
+            let _: redis::RedisResult<()> = self.redis.clone()
+                .expire(format!("{}:{}", retry_key_prefix, bid), 86400).await;
+            // 从失败集合移除
+            let _: redis::RedisResult<i64> = self.redis.clone().srem(&failed_key, bid).await;
+            requeued += 1;
+            tracing::info!("[{}] Recovered Bug #{} — requeued for retry", self.agent_id, bid);
+        }
+
+        if requeued > 0 {
+            tracing::info!("[{}] Startup recovery: requeued {} failed bugs", self.agent_id, requeued);
+            let _ = self.feishu.send(&format!("🔄 [{}] 启动恢复：重新入队 {} 个失败 Bug", self.agent_name, requeued), None).await;
         }
     }
 
@@ -254,19 +333,62 @@ impl AgentExecutor {
         let mut redis_clone = self.redis.clone();
         tokio::spawn(async move {
             tracing::info!("[{}] Codex spawn started for Bug #{}", an, bid);
-            let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tokio::task::block_in_place(|| {
-                    subagent::run_codex_fix(&an, &bid, &m, "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh", 10800)
-                })
-            })) {
-                Ok(r) => r,
-                Err(panic) => {
-                    let msg = if let Some(s) = panic.downcast_ref::<String>() { s.clone() } else { "panic".into() };
-                    tracing::error!("[{}] Codex panic for #{}: {}", an, bid, msg);
-                    let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
-                    return;
+
+            // ── 自动重试逻辑：最多 MAX_FIX_RETRIES 次，指数退避 ──
+            let mut r = None;
+            for attempt in 0..=MAX_FIX_RETRIES {
+                if attempt > 0 {
+                    let delay_ms = RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                    tracing::warn!("[{}] Retry #{}/{} for Bug #{} after {}ms", an, attempt, MAX_FIX_RETRIES, bid, delay_ms);
+                    tr.log(&an, "fix_retry", Some(&format!("Bug#{}", bid)),
+                        Some(&format!("重试第{}次，等待{}ms", attempt, delay_ms)),
+                        Some("codex"), None, None, Some("retrying")).await;
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
-            };
+
+                let attempt_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tokio::task::block_in_place(|| {
+                        subagent::run_codex_fix(&an, &bid, &m, "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh", 10800)
+                    })
+                })) {
+                    Ok(r) => r,
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<String>() { s.clone() } else { "panic".into() };
+                        tracing::error!("[{}] Codex panic for #{} (attempt {}): {}", an, bid, attempt, msg);
+                        // Panic is always transient — retry
+                        if attempt < MAX_FIX_RETRIES { continue; }
+                        CodexResult {
+                            success: false, bug_id: bid.clone(), elapsed_ms: 0,
+                            stdout: String::new(), stderr: format!("panic: {}", msg),
+                            exit_code: -1, changes: 0,
+                        }
+                    }
+                };
+
+                // 成功直接用
+                if attempt_result.success {
+                    r = Some(attempt_result);
+                    break;
+                }
+
+                // 失败：检查是否是瞬态错误
+                if attempt < MAX_FIX_RETRIES && is_transient_error(&attempt_result.stderr, &attempt_result.stdout) {
+                    tracing::warn!("[{}] Transient error for Bug #{} (attempt {}): {}", an, bid,
+                        attempt, attempt_result.stderr.chars().take(150).collect::<String>());
+                    continue;
+                }
+
+                // 非瞬态错误或已达最大重试次数
+                r = Some(attempt_result);
+                break;
+            }
+
+            let r = r.unwrap_or(CodexResult {
+                success: false, bug_id: bid.clone(), elapsed_ms: 0,
+                stdout: String::new(), stderr: "all retries exhausted".into(),
+                exit_code: -1, changes: 0,
+            });
+
             tracing::info!("[{}] Fix #{}: ok={} changes={} time={}ms", an, bid, r.success, r.changes, r.elapsed_ms);
             tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("codex"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
             let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
