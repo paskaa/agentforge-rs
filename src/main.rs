@@ -189,6 +189,8 @@ async fn main() -> anyhow::Result<()> {
 
             // Generate optimization actions
             let actions = optimizer.analyze_and_optimize(&report.agent_metrics, &report.failure_patterns);
+            // Apply actions to populate extra_constraints (persisted via save)
+            optimizer.apply_actions(&actions);
 
             println!("🔧 L5 自优化分析");
             println!("═══════════════════════════════");

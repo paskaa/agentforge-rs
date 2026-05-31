@@ -271,6 +271,17 @@ impl AgentExecutor {
             tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("codex"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
             let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
 
+            // L5: 自动评分 — 更新 agent 成功率和耗时
+            {
+                let scores_path = "/var/lib/agentforge/agent_scores.json";
+                let mut opt = super::self_optimizer::SelfOptimizer::load(scores_path);
+                let bug_type = if m.contains("前端") || m.contains("vue") || m.contains("界面") { "frontend" }
+                    else if m.contains("SQL") || m.contains("数据库") || m.contains("迁移") { "database" }
+                    else { "backend" };
+                opt.update_scores(&an, bug_type, r.success, r.elapsed_ms as f64 / 1000.0);
+                let _ = opt.save(scores_path);
+            }
+
             // 飞书通知修复结果
             let _ = feishu.send(&format!(
                 "{} Bug #{} 修复{}（{} 秒，{} 个文件变更）",

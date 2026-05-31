@@ -46,13 +46,22 @@ impl SelfOptimizer {
         let data = std::fs::read_to_string(path).unwrap_or_default();
         let scores: HashMap<String, AgentScore> =
             serde_json::from_str(&data).unwrap_or_default();
-        Self { scores, extra_constraints: HashMap::new() }
+        // Load extra constraints from separate file
+        let extra_path = format!("{}.constraints", path);
+        let extra_data = std::fs::read_to_string(&extra_path).unwrap_or_default();
+        let extra_constraints: HashMap<String, Vec<String>> =
+            serde_json::from_str(&extra_data).unwrap_or_default();
+        Self { scores, extra_constraints }
     }
 
     /// Save scores to JSON file.
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(&self.scores)?;
-        std::fs::write(path, json)
+        std::fs::write(path, json)?;
+        // Also persist extra constraints
+        let extra_path = format!("{}.constraints", path);
+        let extra_json = serde_json::to_string_pretty(&self.extra_constraints)?;
+        std::fs::write(extra_path, extra_json)
     }
 
     /// Update agent scores based on recent fix results.
@@ -178,18 +187,53 @@ impl SelfOptimizer {
         actions
     }
 
+    /// Apply optimization actions — populate extra_constraints from generated actions.
+    /// Deduplicates and caps at MAX_EXTRA_CONSTRAINTS per agent.
+    const MAX_EXTRA_CONSTRAINTS: usize = 10;
+
+    pub fn apply_actions(&mut self, actions: &[OptimizationAction]) {
+        for action in actions {
+            if action.confidence < 0.6 {
+                continue;
+            }
+            // Skip noise: git HEAD, attempt=N, empty category patterns
+            let change = &action.change;
+            if change.contains("HEAD is now at") || change.contains("attempt=")
+                || change.chars().filter(|c| *c != '\n' && *c != '-' && *c == ' ').count() < 3 {
+                continue;
+            }
+            let constraints = self.extra_constraints
+                .entry(action.target_agent.clone())
+                .or_insert_with(Vec::new);
+            // Deduplicate: skip if similar constraint already exists
+            let is_dup = constraints.iter().any(|existing| {
+                let a: Vec<&str> = existing.split_whitespace().collect();
+                let b: Vec<&str> = change.split_whitespace().collect();
+                let common = a.iter().filter(|w| b.contains(w)).count();
+                common > a.len() * 6 / 10
+            });
+            if !is_dup && constraints.len() < Self::MAX_EXTRA_CONSTRAINTS {
+                constraints.push(change.clone());
+            }
+        }
+    }
+
     /// Suggest prompt enhancement based on failure patterns.
     fn suggest_prompt_boost(&self, agent_id: &str, patterns: &[super::analytics::FailurePattern]) -> String {
+        // Filter to only real error categories (not git noise)
         let relevant: Vec<&str> = patterns.iter()
             .filter(|p| p.agents.contains(&agent_id.to_string()))
             .map(|p| p.error_category.as_str())
+            .filter(|cat| !cat.is_empty() && !cat.starts_with("HEAD is now at")
+                && !cat.starts_with("attempt=") && !cat.contains("Creating isolate")
+                && !cat.contains("Claude Code") && cat.len() <= 50)
             .collect();
 
         if relevant.is_empty() {
-            return format!("建议 {} 增加通用约束：先读 AGENTS.md 再修复", agent_id);
+            return format!("建议 {} 增加通用约束：修复前先读 AGENTS.md，修复后验证编译", agent_id);
         }
 
-        let hints: Vec<String> = relevant.iter().map(|cat| {
+        let hints: Vec<String> = relevant.iter().take(5).map(|cat| {
             if cat.contains("编译") || cat.contains("compile") {
                 "修改后必须运行编译检查".into()
             } else if cat.contains("SQL") || cat.contains("sql") {
@@ -199,18 +243,24 @@ impl SelfOptimizer {
             } else if cat.contains("导入") || cat.contains("import") {
                 "检查 import 路径和包依赖".into()
             } else {
-                format!("注意「{}」相关问题", cat.chars().take(20).collect::<String>())
+                format!("注意「{}」相关问题", cat.chars().take(15).collect::<String>())
             }
         }).collect();
 
         format!(
-            "基于 {} 的失败模式分析，建议 {} 增加约束：\n- {}",
+            "基于 {} 种失败模式分析，建议 {} 增加约束：\n- {}",
             relevant.len(), agent_id, hints.join("\n- ")
         )
     }
 
     /// Suggest constraint for a specific error pattern.
     fn suggest_constraint_for_error(&self, error_category: &str) -> String {
+        // Skip noise patterns that aren't real error categories
+        if error_category.is_empty() || error_category.starts_with("HEAD is now at")
+            || error_category.starts_with("attempt=") || error_category.contains("Creating isolate")
+            || error_category.contains("Claude Code") || error_category.len() > 50 {
+            return "修复前必须先读 AGENTS.md 了解项目规范，修复后运行 cargo check / mvn compile 验证".into();
+        }
         if error_category.contains("编译") || error_category.contains("compile") {
             "修改后必须运行 cargo check / mvn compile / npm run build 确认编译通过".into()
         } else if error_category.contains("SQL") || error_category.contains("mapper") {
@@ -219,8 +269,10 @@ impl SelfOptimizer {
             "涉及数据库字段变更时，必须走通全链路 6 环".into()
         } else if error_category.contains("权限") || error_category.contains("auth") {
             "注意权限检查和鉴权逻辑".into()
+        } else if error_category.contains("类型") || error_category.contains("type") {
+            "注意 TypeScript/Java 类型匹配，修改后运行类型检查".into()
         } else {
-            format!("针对「{}」错误增加专项检查", error_category.chars().take(30).collect::<String>())
+            format!("针对「{}」错误增加专项检查", error_category.chars().take(20).collect::<String>())
         }
     }
 

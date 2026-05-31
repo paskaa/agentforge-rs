@@ -178,6 +178,14 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     };
     let constraints = agent_constraints(agent_name);
 
+    // L5: 加载自优化器生成的额外约束
+    let extra_constraints = {
+        let opt = super::self_optimizer::SelfOptimizer::load("/var/lib/agentforge/agent_scores.json");
+        let extras = opt.get_extra_constraints(agent_name);
+        if extras.is_empty() { String::new() }
+        else { format!("\n## L5 自动优化约束（基于历史失败分析）\n{}", extras.join("\n")) }
+    };
+
     format!(
         r#"你是一个中文编程助手。使用简体中文思考和回复。
 
@@ -185,7 +193,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 你是 **{role_name}**。{role_desc}
 你的专长领域：{expertise}
 
-{constraints}
+{constraints}{extra_constraints}
 
 ## Harness Engineering 方法论（必须遵守）
 
