@@ -306,6 +306,7 @@ impl AgentExecutor {
         let reply = format!("✅ 已分析 {} 个 Bug，已分派给对应智能体。", bugs.len());
         let _ = self.feishu.send(&reply, None).await;
         self.traces.log(&self.agent_id, "pm_routed", None, Some(&reply), None, None, None, Some("ok")).await;
+        self.publish_trace(&self.agent_id, "pm_routed", "", &reply, "ok", 0).await;
     }
 
 
@@ -367,6 +368,13 @@ impl AgentExecutor {
                     tr.log(&an, "fix_retry", Some(&format!("Bug#{}", bid)),
                         Some(&format!("重试第{}次，等待{}ms", attempt, delay_ms)),
                         Some("codex"), None, None, Some("retrying")).await;
+                    // Publish to Redis for WebSocket real-time
+                    let tr_clone = tr.clone();
+                    let an_c = an.clone(); let bid_c = bid.clone();
+                    tokio::spawn(async move {
+                        tr_clone.publish_trace_for_ws(&an_c, "fix_retry", &format!("Bug#{}", bid_c),
+                            &format!("重试第{}次", attempt), "retrying", 0).await;
+                    });
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
 
@@ -415,6 +423,18 @@ impl AgentExecutor {
 
             tracing::info!("[{}] Fix #{}: ok={} changes={} time={}ms", an, bid, r.success, r.changes, r.elapsed_ms);
             tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&r.stdout.chars().take(200).collect::<String>()), Some("codex"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"})).await;
+            // Publish to Redis for WebSocket real-time
+            {
+                let tr_clone = tr.clone();
+                let an_c = an.clone(); let bid_c = bid.clone();
+                let msg_c = r.stdout.chars().take(200).collect::<String>();
+                let status_c = if r.success {"ok"} else {"failed"};
+                let dur_c = r.elapsed_ms as i64;
+                tokio::spawn(async move {
+                    tr_clone.publish_trace_for_ws(&an_c, "fix_done", &format!("Bug#{}", bid_c),
+                        &msg_c, status_c, dur_c).await;
+                });
+            }
             let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
 
             // L5: 自动评分 — 更新 agent 成功率和耗时
@@ -603,6 +623,7 @@ impl AgentExecutor {
             ).await;
         }
         self.traces.log("zhangfei", "test_done", Some(&format!("Bug#{}", bid)), Some(if test_passed {"pass"} else {"fail"}), None, None, None, Some(if test_passed {"ok"} else {"failed"})).await;
+        self.traces.publish_trace_for_ws("zhangfei", "test_done", &format!("Bug#{}", bid), if test_passed {"测试通过"} else {"测试失败"}, if test_passed {"ok"} else {"failed"}, 0).await;
     }
 
     async fn handle_pipeline_verify(&self, msg: &str) {
@@ -614,6 +635,7 @@ impl AgentExecutor {
         let _ = tokio::process::Command::new("bash").arg("-c").arg(format!("{}/zentao-write-bug.sh assign {} {} '验收通过'", self.zentao_dir, bid, rep)).output().await;
         let _ = self.feishu.send(&format!("✅ Bug #{} 验收通过。", bid), None).await;
         self.traces.log("huatuo", "verify_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok")).await;
+        self.traces.publish_trace_for_ws("huatuo", "verify_done", &format!("Bug#{}", bid), "验收完成", "ok", 0).await;
     }
 
     async fn handle_chenlin_doc(&self, msg: &str) {
@@ -622,6 +644,7 @@ impl AgentExecutor {
         let _: redis::RedisResult<()> = self.redis.clone().set_ex(format!("fix_doc:{}", bid), &doc, 30*86400).await;
         let _ = self.feishu.send(&format!("📚 Bug #{} 文档已归档。", bid), None).await;
         self.traces.log("chenlin", "doc_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok")).await;
+        self.traces.publish_trace_for_ws("chenlin", "doc_done", &format!("Bug#{}", bid), "归档完成", "ok", 0).await;
     }
     /// Push a task to an agent queue with dedup: removes any existing entry for same bug ID first.
     async fn push_task_dedup(&self, queue: &str, task_json: &str) {
@@ -802,6 +825,7 @@ impl AgentExecutor {
         tracing::info!("[zhugeliang] Bug #{} routed to {} (db_review={})", bid, next, needs_db_review);
         let _ = self.feishu.send(&format!("🔀 Bug #{} 路由：{} → {}", bid, sender, next), None).await;
         self.traces.log("zhugeliang", "analyze_done", Some(&format!("Bug#{}", bid)), Some(&format!("routed_to={} db={}", next, needs_db_review)), None, None, None, Some("ok")).await;
+        self.traces.publish_trace_for_ws("zhugeliang", "analyze_done", &format!("Bug#{}", bid), &format!("路由到{} DB审查={}", next, needs_db_review), "ok", 0).await;
     }
 
     /// 荀彧：DB 变更审查
@@ -863,6 +887,7 @@ impl AgentExecutor {
             ).await;
         }
         self.traces.log("xunyu", "db_review_done", Some(&format!("Bug#{}", bid)), Some(if review_passed {"pass"} else {"fail"}), None, None, None, Some(if review_passed {"ok"} else {"failed"})).await;
+        self.traces.publish_trace_for_ws("xunyu", "db_review_done", &format!("Bug#{}", bid), if review_passed {"DB审查通过"} else {"DB审查失败"}, if review_passed {"ok"} else {"failed"}, 0).await;
     }
 
     /// 刘备：Pipeline 进度报告
@@ -892,6 +917,7 @@ impl AgentExecutor {
         
         let _ = self.feishu.send(&report, None).await;
         self.traces.log("liubei", "report_done", None, Some(&report), None, None, None, Some("ok")).await;
+        self.traces.publish_trace_for_ws("liubei", "report_done", "", "报告完成", "ok", 0).await;
     }
     async fn handle_chat_hermes(&self, msg: &str, task: &Task) -> bool {
         let hermes_script = "/root/agentforge/scripts/hermes_bridge_cli.py";

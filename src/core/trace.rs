@@ -101,6 +101,32 @@ impl TraceStore {
         .await;
     }
 
+    /// Publish a trace event to Redis pub/sub for WebSocket broadcasting.
+    pub async fn publish_trace_for_ws(&self, agent_id: &str, event: &str, task_id: &str, message: &str, status: &str, duration_ms: i64) {
+        let trace_event = serde_json::json!({
+            "event": "trace",
+            "data": {
+                "ts": Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                "agent_id": agent_id,
+                "event": event,
+                "task_id": task_id,
+                "message": message.chars().take(200).collect::<String>(),
+                "status": status,
+                "duration_ms": duration_ms,
+            }
+        });
+        let client = redis::Client::open("redis://127.0.0.1:16379");
+        if let Ok(c) = client {
+            if let Ok(mut conn) = c.get_async_connection().await {
+                let _: redis::RedisResult<()> = redis::cmd("PUBLISH")
+                    .arg("agentforge:traces")
+                    .arg(trace_event.to_string())
+                    .query_async(&mut conn)
+                    .await;
+            }
+        }
+    }
+
     /// Query recent traces.
     pub async fn query(&self, limit: i64) -> Vec<Trace> {
         sqlx::query_as::<_, Trace>(
