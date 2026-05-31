@@ -83,10 +83,11 @@ impl TraceStore {
         model: Option<&str>,
         duration_ms: Option<i64>,
         status: Option<&str>,
+        detail: Option<&str>,
     ) {
         let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
         let _ = sqlx::query(
-            "INSERT INTO traces (ts, agent_id, event, task_id, message, tool, model, duration_ms, status) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO traces (ts, agent_id, event, task_id, message, tool, model, duration_ms, status, detail) VALUES (?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&ts)
         .bind(agent_id)

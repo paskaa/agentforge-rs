@@ -59,6 +59,9 @@
       </el-table>
     </el-card>
 
+    <!-- 全链路验证 (当前 Bug) -->
+    <VerificationFlow v-if="currentBugId" :bugId="currentBugId" />
+
     <!-- 实时日志 WebSocket -->
     <el-card shadow="never" style="margin-bottom:16px">
       <template #header>
@@ -129,6 +132,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ArrowLeft, Link } from '@element-plus/icons-vue'
+import VerificationFlow from '../components/VerificationFlow.vue'
 
 const route = useRoute()
 const agentId = computed(() => route.params.id)
@@ -142,6 +146,11 @@ const logContainer = ref(null)
 let ws = null
 let pollTimer = null
 let lastTs = ''
+
+const currentBugId = computed(() => {
+  const latest = traces.value.find(t => t.event === 'fix_start' && t.task_id)
+  return latest ? latest.task_id.replace('Bug#', '') : ''
+})
 
 const successCount = computed(() => traces.value.filter(t => t.event === 'fix_done' && t.status === 'ok').length)
 const failCount = computed(() => traces.value.filter(t => t.event === 'fix_done' && t.status !== 'ok').length)

@@ -750,6 +750,36 @@ async fn batch_enqueue_api(
 
 
 
+async fn bug_verification_api(
+    axum::extract::Path(bug_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let db_path = "/var/lib/agentforge/traces.db";
+    // Get the latest verification report for this bug
+    let output = std::process::Command::new("sqlite3")
+        .args([db_path, "-json", &format!(
+            "SELECT ts, agent_id, event, COALESCE(message,'') as message, COALESCE(status,'') as status, COALESCE(duration_ms,0) as duration_ms, COALESCE(detail,'null') as detail FROM traces WHERE task_id LIKE '%{}%' AND event IN ('verification','verify_start','verify_done','verify_read_testdoc','verify_diff') ORDER BY ts ASC", bug_id
+        )])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let traces: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap_or_default();
+    
+    // Find the full verification report (stored as detail in 'verification' event)
+    let full_report = traces.iter()
+        .find(|t| t.get("event").and_then(|e| e.as_str()) == Some("verification"))
+        .and_then(|t| t.get("detail"))
+        .and_then(|d| d.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    
+    Json(serde_json::json!({
+        "bug_id": bug_id,
+        "traces": traces,
+        "full_report": full_report,
+        "count": traces.len()
+    }))
+}
+
+
 async fn bug_traces_api(
     axum::extract::Path(bug_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
@@ -780,6 +810,7 @@ async fn bug_traces_api(
         .route("/api/agent/:id/traces/rt", get(agent_traces_realtime))
         .route("/api/agent/:id/queue", get(agent_queue_api))
         .route("/api/bugs/:id/traces", get(bug_traces_api))
+        .route("/api/bugs/:id/verification", get(bug_verification_api))
         .route("/api/queues", get(queues_api))
         .route("/api/zentao/stats", get(zentao_stats_api))
         .route("/api/constraints", get(constraints_api))

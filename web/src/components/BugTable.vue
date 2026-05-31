@@ -7,10 +7,10 @@
     <el-table :data="paginated" stripe style="width:100%" :default-sort="{ prop: 'id', order: 'descending' }">
       <el-table-column prop="id" label="#" width="80" sortable>
         <template #default="{ row }">
-          <a :href="row.url" target="_blank" rel="noopener" class="bug-link">
+          <span class="bug-link" @click.stop="showDetail(row.id)" style="cursor:pointer">
             #{{ row.id }}
             <el-icon style="font-size:10px;margin-left:2px"><Link /></el-icon>
-          </a>
+          </span>
         </template>
       </el-table-column>
       <el-table-column prop="title" label="标题" min-width="300" show-overflow-tooltip />
@@ -35,18 +35,35 @@
     <div style="display:flex;justify-content:center;margin-top:12px" v-if="filtered.length > pageSize">
       <el-pagination v-model:current-page="page" :page-size="pageSize" :total="filtered.length" layout="prev, pager, next" background small />
     </div>
+
+    <!-- Bug 详情弹框 -->
+    <el-dialog v-model="detailVisible" :title="'Bug #' + detailBugId + ' 详情'" width="700px" destroy-on-close>
+      <VerificationFlow :bugId="String(detailBugId)" />
+      <div style="margin-top:12px">
+        <a :href="detailBugUrl" target="_blank" style="color:#60a5fa">🔗 在禅道中查看完整 Bug</a>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, inject } from 'vue'
 import { Link, Plus } from '@element-plus/icons-vue'
+import VerificationFlow from './VerificationFlow.vue'
 
 const props = defineProps({ bugs: { type: Array, default: () => [] } })
 const onEnqueue = inject('onEnqueue', null)
 const search = ref('')
 const page = ref(1)
 const pageSize = 20
+const detailVisible = ref(false)
+const detailBugId = ref('')
+const detailBugUrl = computed(() => `https://zentao.gentronhealth.com/index.php?m=bug&f=view&bugID=${detailBugId.value}`)
+
+function showDetail(id) {
+  detailBugId.value = id
+  detailVisible.value = true
+}
 
 const filtered = computed(() => {
   if (!search.value) return props.bugs
