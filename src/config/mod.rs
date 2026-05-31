@@ -10,6 +10,8 @@ pub struct Config {
     pub llm: LlmConfig,
     pub feishu: FeishuConfig,
     pub zentao: ZentaoConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
     pub agents: HashMap<String, AgentConfig>,
     pub scheduler: SchedulerConfig,
 }
@@ -49,6 +51,12 @@ pub struct ZentaoConfig {
     pub base_url: String,
     pub scripts_dir: PathBuf,
     pub token_file: PathBuf,
+    #[serde(default = "default_zentao_cli")]
+    pub cli_path: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -66,12 +74,106 @@ pub struct SchedulerConfig {
     pub tasks_file: PathBuf,
 }
 
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DatabaseConfig {
+    #[serde(default = "default_db_host")]
+    pub host: String,
+    #[serde(default = "default_db_port")]
+    pub port: u16,
+    #[serde(default = "default_db_name")]
+    pub database: String,
+    #[serde(default = "default_db_user")]
+    pub username: String,
+    #[serde(default = "default_db_password")]
+    pub password: String,
+}
+
+fn default_db_host() -> String { "127.0.0.1".into() }
+fn default_db_port() -> u16 { 5432 }
+fn default_db_name() -> String { "postgresql".into() }
+fn default_db_user() -> String { "postgresql".into() }
+fn default_db_password() -> String { String::new() }
 // Defaults
 fn default_redis_host() -> String {
     "127.0.0.1".into()
 }
 fn default_redis_port() -> u16 {
     16379
+}
+
+impl Default for RedisConfig {
+    fn default() -> Self {
+        Self {
+            host: default_redis_host(),
+            port: default_redis_port(),
+            db: 0,
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+fn default_zentao_cli() -> String {
+    "/usr/local/bin/zentao".into()
+}
+
+impl Default for ZentaoConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            scripts_dir: PathBuf::from("."),
+            token_file: PathBuf::from("."),
+            cli_path: default_zentao_cli(),
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            api_base: String::new(),
+            api_key: String::new(),
+            default_model: String::new(),
+            coding_model: String::new(),
+        }
+    }
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            app_id: String::new(),
+            app_secret: String::new(),
+            group_chat_id: String::new(),
+            credentials_file: None,
+        }
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tasks_file: PathBuf::from("./config/scheduler_tasks.json"),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            redis: RedisConfig::default(),
+            llm: LlmConfig::default(),
+            feishu: FeishuConfig::default(),
+            zentao: ZentaoConfig::default(),
+            agents: HashMap::new(),
+            database: DatabaseConfig::default(),
+            scheduler: SchedulerConfig::default(),
+        }
+    }
 }
 
 impl Config {

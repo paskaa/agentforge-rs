@@ -11,3 +11,6 @@
 *.env
 config/secrets/
 config/local/
+
+# Real config (use agentforge.yaml.example as template)
+config/agentforge.yaml

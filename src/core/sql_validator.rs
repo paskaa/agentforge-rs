@@ -26,13 +26,24 @@ pub struct PgConfig {
 
 impl Default for PgConfig {
     fn default() -> Self {
-        Self {
-            host: "192.168.110.252".into(),
-            port: "15432".into(),
-            db: "postgresql".into(),
-            user: "postgresql".into(),
-            password: "Jchl1528".into(),
-            schema: "histest1".into(),
+        if let Ok(cfg) = crate::config::Config::load() {
+            Self {
+                host: cfg.database.host,
+                port: cfg.database.port.to_string(),
+                db: cfg.database.database,
+                user: cfg.database.username,
+                password: cfg.database.password,
+                schema: "histest1".into(),
+            }
+        } else {
+            Self {
+                host: "127.0.0.1".into(),
+                port: "5432".into(),
+                db: "postgresql".into(),
+                user: "postgresql".into(),
+                password: String::new(),
+                schema: "histest1".into(),
+            }
         }
     }
 }

@@ -452,6 +452,8 @@ fn run_db_migrations(agent_name: &str, work_dir: &str, bug_id: &str) -> bool {
     tracing::info!("[{}] Found {} migration script(s) for Bug #{}: {:?}",
         agent_name, pending.len(), bug_id, pending);
 
+    let app_cfg = crate::config::Config::load().unwrap_or_default();
+
     // Schema list to try (test environment)
     let schemas = ["histest1", "hisdev"];
 
@@ -508,11 +510,12 @@ fn run_db_migrations(agent_name: &str, work_dir: &str, bug_id: &str) -> bool {
         let mut any_schema_ok = false;
         for schema in &schemas {
             match Command::new("psql")
-                .args(["-h", "192.168.110.252", "-p", "15432", "-d", "postgresql",
-                       "-U", "postgresql", "-v", "ON_ERROR_STOP=1",
+                .args(["-h", &app_cfg.database.host, "-p", &app_cfg.database.port.to_string(),
+                       "-d", &app_cfg.database.database, "-U", &app_cfg.database.username,
+                       "-v", "ON_ERROR_STOP=1",
                        "-v", &format!("search_path={}", schema),
                        "-f", &full.to_string_lossy()])
-                .env("PGPASSWORD", "Jchl1528")
+                .env("PGPASSWORD", &app_cfg.database.password)
                 .output()
             {
                 Ok(o) if o.status.success() => {
@@ -1169,11 +1172,13 @@ fn build_zentao_comment(bug_id: &str, bug_title: &str, root_causes: &[String], f
 /// 只加备注不改状态（成功和失败都用）
 fn comment_in_zentao(bug_id: &str, comment: &str) {
     // Refresh token
+    let app_cfg = crate::config::Config::load().unwrap_or_default();
+    let cli = &app_cfg.zentao.cli_path;
     let _ = Command::new("bash")
-        .args(["-c", "/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js login -s https://zentao.gentronhealth.com -u zhangfei -p Gentron@2025"])
+        .args(["-c", &format!("{} login -s {} -u {} -p {}", cli, app_cfg.zentao.base_url, app_cfg.zentao.username, app_cfg.zentao.password)])
         .output();
 
-    let result = Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+    let result = Command::new(cli)
         .args(["bug", "update", "--id", bug_id, "--comment", comment])
         .output();
 
@@ -1208,10 +1213,10 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
     let comment = build_zentao_comment(bug_id, bug_title, &root_causes, &fixes);
 
     // Step 1: Refresh Zentao token
+    let app_cfg = crate::config::Config::load().unwrap_or_default();
+    let cli = &app_cfg.zentao.cli_path;
     let _ = Command::new("bash")
-        .args(["-c", &format!(
-            "/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js login -s https://zentao.gentronhealth.com -u zhangfei -p Gentron@2025"
-        )])
+        .args(["-c", &format!("{} login -s {} -u {} -p {}", cli, app_cfg.zentao.base_url, app_cfg.zentao.username, app_cfg.zentao.password)])
         .output();
 
     // Step 2: 查询 bug 的 assignedTo 判断是人类还是智能体
@@ -1242,11 +1247,11 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
         // 用 --data 传 JSON 同时设置 comment 和 assignedTo
         let escaped = comment.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
         let data_json = format!(r#"{{"comment":"{}","assignedTo":"zhangfei"}}"#, escaped);
-        Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+        Command::new(&app_cfg.zentao.cli_path)
             .args(["bug", "update", "--id", bug_id, "--data", &data_json])
             .output()
     } else {
-        Command::new("/root/.nvm/versions/node/v22.22.0/lib/node_modules/zentao-cli/bin/zentao.js")
+        Command::new(&app_cfg.zentao.cli_path)
             .args(["bug", "update", "--id", bug_id, "--comment", &comment])
             .output()
     };

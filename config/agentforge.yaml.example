@@ -4,13 +4,13 @@ redis:
   db: 0
 
 llm:
-  api_base: "https://token-plan-cn.xiaomimimo.com/v1"
-  api_key: "tp-c5g4lq98ufrnmb8tgde32pf1jodrqs2bfkyz19shto080000"
+  api_base: "https://your-api-base/v1"
+  api_key: "${MIMO_API_KEY}"
   default_model: "mimo-v2.5"
   coding_model: "mimo-v2.5"
   fallback:
-    api_base: "https://token-plan-cn.xiaomimimo.com/v1"
-    api_key: "tp-c5g4lq98ufrnmb8tgde32pf1jodrqs2bfkyz19shto080000"
+    api_base: "https://your-api-base/v1"
+    api_key: "${MIMO_API_KEY}"
     default_model: "mimo-v2.5"
     coding_model: "mimo-v2.5"
     extra_models:
@@ -19,14 +19,24 @@ llm:
       - "mimo-v2-pro"
 
 feishu:
-  app_id: "cli_a95e736346269bcd"
-  app_secret: "gTXw6mygEC1Vru47GacnMfa0TpRQpGIa"
-  group_chat_id: "oc_856716cb424463b36289adbfa71a886b"
+  app_id: "${FEISHU_APP_ID}"
+  app_secret: "${FEISHU_APP_SECRET}"
+  group_chat_id: "${FEISHU_GROUP_CHAT_ID}"
 
 zentao:
-  base_url: "https://zentao.gentronhealth.com"
-  scripts_dir: "/root/.openclaw/extensions/zentao-token-refresh"
-  token_file: "/root/.config/zentao/.env"
+  base_url: "https://your-zentao-instance"
+  scripts_dir: "/path/to/zentao-token-refresh"
+  token_file: "/path/to/zentao/.env"
+  cli_path: "/usr/local/bin/zentao"
+  username: "${ZENTAO_USERNAME}"
+  password: "${ZENTAO_PASSWORD}"
+
+database:
+  host: "${DB_HOST}"
+  port: 5432
+  database: "postgresql"
+  username: "${DB_USERNAME}"
+  password: "${DB_PASSWORD}"
 
 agents:
   zhugeliang:
