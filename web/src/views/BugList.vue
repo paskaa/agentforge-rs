@@ -1,43 +1,43 @@
 <template>
-  <div class="bug-list-page">
-    <div class="page-header">
-      <router-link to="/" class="back-link">
-        <el-icon><ArrowLeft /></el-icon> 返回仪表盘
+  <div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <router-link to="/" style="text-decoration:none">
+        <el-button size="small" :icon="ArrowLeft">返回仪表盘</el-button>
       </router-link>
-      <h1>📋 Bug 明细</h1>
+      <h1 style="font-size:20px">📋 Bug 明细</h1>
     </div>
 
     <el-tabs v-model="activeTab" type="border-card" @tab-change="onTabChange">
-      <el-tab-pane label="未关闭 Bug" name="unclosed">
+      <el-tab-pane name="unclosed">
         <template #label>
-          <span>🔒 未关闭 <el-badge :value="unclosedBugs.length" type="warning" /></span>
+          <span>🔒 未关闭 <el-badge :value="unclosedBugs.length" type="warning" class="tab-badge" /></span>
         </template>
         <BugTable :bugs="unclosedBugs" />
       </el-tab-pane>
 
-      <el-tab-pane label="未解决 Bug" name="unresolved">
+      <el-tab-pane name="unresolved">
         <template #label>
-          <span>⚠️ 未解决 <el-badge :value="unresolvedBugs.length" type="danger" /></span>
+          <span>⚠️ 未解决 <el-badge :value="unresolvedBugs.length" type="danger" class="tab-badge" /></span>
         </template>
         <BugTable :bugs="unresolvedBugs" />
       </el-tab-pane>
 
-      <el-tab-pane label="今日修复" name="fixed_today">
+      <el-tab-pane name="fixed_today">
         <template #label>
-          <span>✅ 今日修复 <el-badge :value="recentFixes.length" type="success" /></span>
+          <span>✅ 今日修复 <el-badge :value="recentFixes.length" type="success" class="tab-badge" /></span>
         </template>
         <FixTable :fixes="recentFixes" />
       </el-tab-pane>
 
-      <el-tab-pane label="全部 Bug" name="all">
+      <el-tab-pane name="all">
         <template #label>
-          <span>📊 全部 <el-badge :value="allBugs.length" /></span>
+          <span>📊 全部 <el-badge :value="allBugs.length" class="tab-badge" /></span>
         </template>
         <BugTable :bugs="allBugs" />
       </el-tab-pane>
     </el-tabs>
 
-    <div class="sync-info" v-if="zentao.last_sync">
+    <div style="margin-top:8px;font-size:11px;color:#475569;text-align:right" v-if="zentao.last_sync">
       禅道同步: {{ zentao.last_sync }} · 活跃: {{ zentao.active }} · 总计: {{ zentao.total }}
     </div>
   </div>
@@ -64,46 +64,19 @@ function onTabChange(tab) {
   router.replace({ params: { filter: tab } })
 }
 
-async function fetchZentao() {
+onMounted(async () => {
   try {
-    const r = await fetch('/api/zentao/stats')
-    zentao.value = await r.json()
+    const [zenRes, dashRes] = await Promise.all([
+      fetch('/api/zentao/stats'),
+      fetch('/api/dashboard')
+    ])
+    zentao.value = await zenRes.json()
+    const dash = await dashRes.json()
+    recentFixes.value = dash.recent || []
   } catch {}
-}
-
-async function fetchRecent() {
-  try {
-    const r = await fetch('/api/dashboard')
-    const d = await r.json()
-    recentFixes.value = d.recent || []
-  } catch {}
-}
-
-onMounted(() => {
-  fetchZentao()
-  fetchRecent()
 })
 </script>
 
 <style scoped>
-.bug-list-page { max-width: 1200px; }
-.page-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
-.page-header h1 { font-size: 20px; font-weight: 600; }
-.back-link {
-  display: inline-flex; align-items: center; gap: 4px;
-  color: #64748b; text-decoration: none; font-size: 13px;
-  padding: 6px 10px; border-radius: 6px; transition: all 0.15s;
-}
-.back-link:hover { background: #334155; color: #e2e8f0; }
-
-:deep(.el-tabs) { border-radius: 10px; overflow: hidden; }
-:deep(.el-tabs__header) { background: #1e293b; border-color: #334155; }
-:deep(.el-tabs__item) { color: #94a3b8; }
-:deep(.el-tabs__item.is-active) { color: #60a5fa; background: #0f172a; }
-:deep(.el-tabs__content) { background: #0f172a; padding: 16px; }
-:deep(.el-badge__content) { font-size: 10px; }
-
-.sync-info {
-  margin-top: 12px; font-size: 11px; color: #475569; text-align: right;
-}
+.tab-badge { margin-left: 4px; vertical-align: middle; }
 </style>

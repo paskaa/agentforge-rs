@@ -1,49 +1,72 @@
 <template>
-  <div class="app">
-    <nav class="sidebar">
+  <el-container class="app-container">
+    <el-aside width="200px" class="app-aside">
       <div class="logo">
         <span class="logo-icon">⚙️</span>
         <span class="logo-text">AgentForge</span>
-        <span class="logo-badge">RS</span>
+        <el-tag type="primary" size="small" effect="dark">RS</el-tag>
       </div>
-      <router-link to="/" class="nav-item" active-class="active">
-        <span>📊</span> 仪表盘
-      </router-link>
-      <router-link to="/analytics" class="nav-item" active-class="active">
-        <span>📈</span> L4 分析
-      </router-link>
-      <router-link to="/agents" class="nav-item" active-class="active">
-        <span>🤖</span> 智能体
-      </router-link>
-      <router-link to="/queues" class="nav-item" active-class="active">
-        <span>📋</span> 队列
-      </router-link>
+      <el-menu
+        :default-active="route.path"
+        router
+        background-color="#1e293b"
+        text-color="#94a3b8"
+        active-text-color="#60a5fa"
+        class="app-menu"
+      >
+        <el-menu-item index="/">
+          <el-icon><DataBoard /></el-icon>
+          <span>仪表盘</span>
+        </el-menu-item>
+        <el-menu-item index="/bugs/unclosed">
+          <el-icon><Warning /></el-icon>
+          <span>Bug 明细</span>
+        </el-menu-item>
+        <el-menu-item index="/agents">
+          <el-icon><User /></el-icon>
+          <span>智能体</span>
+        </el-menu-item>
+        <el-menu-item index="/queues">
+          <el-icon><List /></el-icon>
+          <span>队列</span>
+        </el-menu-item>
+        <el-menu-item index="/analytics">
+          <el-icon><TrendCharts /></el-icon>
+          <span>L4 分析</span>
+        </el-menu-item>
+      </el-menu>
       <div class="nav-footer">
-        <div class="status-dot" :class="connected ? 'online' : 'offline'"></div>
-        <span>{{ connected ? '已连接' : '断开' }}</span>
+        <el-tag :type="connected ? 'success' : 'danger'" size="small" effect="dark">
+          {{ connected ? '🟢 已连接' : '🔴 断开' }}
+        </el-tag>
       </div>
-    </nav>
-    <main class="content">
+    </el-aside>
+    <el-main class="app-main">
       <router-view />
-    </main>
-  </div>
+    </el-main>
+  </el-container>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { DataBoard, Warning, User, List, TrendCharts } from '@element-plus/icons-vue'
 
+const route = useRoute()
 const connected = ref(false)
 let timer = null
 
 onMounted(async () => {
   try {
     const r = await fetch('/api/health')
-    connected.value = r.ok
+    const d = await r.json()
+    connected.value = d.ok
   } catch { connected.value = false }
   timer = setInterval(async () => {
     try {
       const r = await fetch('/api/health')
-      connected.value = r.ok
+      const d = await r.json()
+      connected.value = d.ok
     } catch { connected.value = false }
   }, 10000)
 })
@@ -54,31 +77,42 @@ onUnmounted(() => clearInterval(timer))
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
-.app { display: flex; height: 100vh; }
-
-.sidebar {
-  width: 220px; background: #1e293b; border-right: 1px solid #334155;
-  display: flex; flex-direction: column; padding: 16px 0;
+.app-container { height: 100vh; }
+.app-aside {
+  background: #1e293b; border-right: 1px solid #334155;
+  display: flex; flex-direction: column; overflow: hidden;
 }
-.logo { display: flex; align-items: center; gap: 8px; padding: 0 20px 20px; border-bottom: 1px solid #334155; }
-.logo-icon { font-size: 24px; }
-.logo-text { font-size: 18px; font-weight: 700; color: #f8fafc; }
-.logo-badge { font-size: 11px; background: #3b82f6; color: white; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
-
-.nav-item {
-  display: flex; align-items: center; gap: 10px; padding: 12px 20px;
-  color: #94a3b8; text-decoration: none; transition: all 0.2s; font-size: 14px;
+.logo {
+  display: flex; align-items: center; gap: 8px; padding: 16px 20px;
+  border-bottom: 1px solid #334155;
 }
-.nav-item:hover { background: #334155; color: #e2e8f0; }
-.nav-item.active { background: #1e3a5f; color: #60a5fa; border-right: 3px solid #3b82f6; }
+.logo-icon { font-size: 22px; }
+.logo-text { font-size: 16px; font-weight: 700; color: #f8fafc; flex: 1; }
+.app-menu { border-right: none !important; flex: 1; }
+.app-main { background: #0f172a; padding: 20px; overflow-y: auto; }
+.nav-footer { padding: 12px 20px; border-top: 1px solid #334155; }
 
-.nav-footer {
-  margin-top: auto; padding: 16px 20px; border-top: 1px solid #334155;
-  display: flex; align-items: center; gap: 8px; font-size: 12px; color: #64748b;
+/* Element Plus 深色主题覆盖 */
+:root {
+  --el-bg-color: #1e293b;
+  --el-bg-color-overlay: #1e293b;
+  --el-text-color-primary: #e2e8f0;
+  --el-text-color-regular: #94a3b8;
+  --el-border-color: #334155;
+  --el-fill-color-blank: #0f172a;
 }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; }
-.status-dot.online { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
-.status-dot.offline { background: #ef4444; }
-
-.content { flex: 1; overflow-y: auto; padding: 24px; }
+.el-table { --el-table-bg-color: #1e293b; --el-table-tr-bg-color: #1e293b; --el-table-header-bg-color: #0f172a; --el-table-row-hover-bg-color: rgba(59,130,246,0.08); --el-table-border-color: #334155; --el-table-text-color: #e2e8f0; }
+.el-table .el-table__row--striped td { background: #0f172a !important; }
+.el-card { --el-card-bg-color: #1e293b; border-color: #334155; }
+.el-input__wrapper { background: #0f172a !important; box-shadow: 0 0 0 1px #334155 inset !important; }
+.el-input__inner { color: #e2e8f0 !important; }
+.el-input__inner::placeholder { color: #475569 !important; }
+.el-tabs { --el-tabs-header-height: 42px; }
+.el-tabs__header { background: #1e293b !important; border-color: #334155 !important; border-radius: 8px 8px 0 0; }
+.el-tabs__item { color: #64748b !important; }
+.el-tabs__item.is-active { color: #60a5fa !important; background: #0f172a; }
+.el-tabs__content { background: #0f172a; padding: 16px; border-radius: 0 0 8px 8px; }
+.el-badge__content { font-size: 10px; }
+.el-statistic__head { color: #64748b !important; }
+.el-statistic__content { color: #e2e8f0 !important; }
 </style>
