@@ -28,5 +28,5 @@ sqlparser = { version = "0.62",  }
 quick-xml = "0.40"
 
 # Web server for dashboard
-axum = "0.7"
-tower-http = { version = "0.5", features = ["fs"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }

@@ -1,45 +1,74 @@
 <template>
   <div class="dashboard">
-    <h1>📊 仪表盘</h1>
-
-    <!-- Top stats -->
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-value">{{ stats.total_bugs || 0 }}</div>
-        <div class="stat-label">活跃 Bug</div>
-      </div>
-      <div class="stat-card success">
-        <div class="stat-value">{{ stats.fixed_today || 0 }}</div>
-        <div class="stat-label">今日修复</div>
-      </div>
-      <div class="stat-card warning">
-        <div class="stat-value">{{ stats.running_agents || 0 }}</div>
-        <div class="stat-label">运行中 Agent</div>
-      </div>
-      <div class="stat-card info">
-        <div class="stat-value">{{ stats.success_rate || '0%' }}</div>
-        <div class="stat-label">总成功率</div>
+    <div class="header">
+      <h1>📊 AgentForge 监控面板</h1>
+      <div class="header-right">
+        <span class="ws-status" :class="wsConnected ? 'online' : 'offline'">
+          {{ wsConnected ? '🟢 实时连接' : '🔴 断开' }}
+        </span>
+        <span class="last-tick" v-if="lastTick">{{ lastTick }}</span>
       </div>
     </div>
 
-    <!-- Agent status -->
+    <!-- Stats row -->
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-value">{{ stats.total_bugs || 0 }}</div><div class="stat-label">活跃 Bug</div></div>
+      <div class="stat-card success"><div class="stat-value">{{ stats.fixed_today || 0 }}</div><div class="stat-label">今日修复</div></div>
+      <div class="stat-card warning"><div class="stat-value">{{ stats.running_agents || 0 }}</div><div class="stat-label">运行 Agent</div></div>
+      <div class="stat-card info"><div class="stat-value">{{ stats.success_rate || 'N/A' }}</div><div class="stat-label">总成功率</div></div>
+    </div>
+
+    <!-- Agent cards -->
     <div class="section">
       <h2>🤖 智能体状态</h2>
       <div class="agent-grid">
-        <div v-for="agent in agents" :key="agent.id" class="agent-card" :class="agent.status">
-          <div class="agent-header">
-            <span class="agent-icon">{{ agent.icon }}</span>
-            <span class="agent-name">{{ agent.name }}</span>
-            <span class="agent-status-badge" :class="agent.status">{{ statusText(agent.status) }}</span>
+        <div v-for="a in agents" :key="a.id" class="agent-card" :class="a.status">
+          <div class="agent-head">
+            <span class="agent-icon">{{ a.icon }}</span>
+            <span class="agent-name">{{ a.name }}</span>
+            <span class="status-dot" :class="a.status"></span>
           </div>
-          <div class="agent-role">{{ agent.role }}</div>
-          <div class="agent-stats">
-            <span>成功率 {{ agent.success_rate }}</span>
-            <span>耗时 {{ agent.avg_time }}</span>
+          <div class="agent-role">{{ a.role }}</div>
+          <div class="agent-meta">
+            <span v-if="a.current_bug" class="current-bug">🔧 {{ a.current_bug }}</span>
+            <span v-else class="idle-text">空闲</span>
           </div>
-          <div class="agent-bar">
-            <div class="agent-bar-fill" :style="{ width: agent.success_rate }"></div>
+          <div class="agent-stats-row">
+            <span>{{ a.rate }}</span>
+            <span>{{ a.avg_s }}</span>
           </div>
+          <div class="bar"><div class="bar-fill" :style="{width: a.rate}"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Queue + Dispatcher -->
+    <div class="two-col">
+      <div class="section">
+        <h2>📋 触发队列</h2>
+        <div class="queue-scroll" ref="queueRef">
+          <div v-if="queue.length === 0" class="empty">队列为空</div>
+          <div v-for="(q, i) in queue" :key="i" class="queue-item">
+            <span class="q-bug">#{{ q.bug_id }}</span>
+            <span class="q-agent">{{ q.agent }}</span>
+            <span class="q-source">{{ q.source }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="section">
+        <h2>⚡ Dispatcher</h2>
+        <div class="dispatcher-box">
+          <div class="d-row"><span class="d-label">模式</span><span class="d-value">{{ dispatcher.mode || 'N/A' }}</span></div>
+          <div class="d-row"><span class="d-label">活跃任务</span><span class="d-value">{{ dispatcher.active_tasks || 0 }}</span></div>
+          <div class="d-row"><span class="d-label">Redis 队列</span><span class="d-value">{{ dispatcher.redis_queues || 0 }}</span></div>
+        </div>
+        <h2 style="margin-top:20px">📨 飞书触发</h2>
+        <div class="feishu-box">
+          <div v-for="(f, i) in feishuEvents" :key="i" class="feishu-item">
+            <span class="f-time">{{ f.time }}</span>
+            <span class="f-msg">{{ f.message }}</span>
+          </div>
+          <div v-if="feishuEvents.length === 0" class="empty">暂无触发记录</div>
         </div>
       </div>
     </div>
@@ -48,127 +77,147 @@
     <div class="section">
       <h2>📝 最近修复</h2>
       <table class="fix-table">
-        <thead>
-          <tr><th>Bug</th><th>Agent</th><th>状态</th><th>耗时</th><th>时间</th></tr>
-        </thead>
+        <thead><tr><th>Bug</th><th>Agent</th><th>状态</th><th>耗时</th><th>时间</th></tr></thead>
         <tbody>
-          <tr v-for="fix in recent_fixes" :key="fix.bug_id">
-            <td class="bug-id">#{{ fix.bug_id }}</td>
-            <td>{{ fix.agent }}</td>
-            <td><span class="status-badge" :class="fix.success ? 'ok' : 'fail'">{{ fix.success ? '✅ 成功' : '❌ 失败' }}</span></td>
-            <td>{{ fix.duration }}</td>
-            <td>{{ fix.time }}</td>
+          <tr v-for="f in recent" :key="f.bug + f.ts">
+            <td class="mono">#{{ f.bug }}</td>
+            <td>{{ f.agent }}</td>
+            <td><span class="badge" :class="f.ok ? 'ok' : 'fail'">{{ f.ok ? '✅' : '❌' }}</span></td>
+            <td>{{ f.dur }}</td>
+            <td class="ts">{{ f.ts }}</td>
           </tr>
         </tbody>
       </table>
-    </div>
-
-    <!-- Pipeline status -->
-    <div class="section">
-      <h2>🔄 Pipeline 状态</h2>
-      <div class="pipeline-info">
-        <div class="pipeline-item">
-          <span class="pipeline-label">当前任务</span>
-          <span class="pipeline-value">{{ pipeline.current || '空闲' }}</span>
-        </div>
-        <div class="pipeline-item">
-          <span class="pipeline-label">队列长度</span>
-          <span class="pipeline-value">{{ pipeline.queue_length || 0 }}</span>
-        </div>
-        <div class="pipeline-item">
-          <span class="pipeline-label">今日处理</span>
-          <span class="pipeline-value">{{ pipeline.processed_today || 0 }}</span>
-        </div>
-      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
 const stats = ref({})
 const agents = ref([])
-const recent_fixes = ref([])
-const pipeline = ref({})
+const recent = ref([])
+const queue = ref([])
+const dispatcher = ref({})
+const feishuEvents = ref([])
+const wsConnected = ref(false)
+const lastTick = ref('')
+const queueRef = ref(null)
 
-const agentIcons = { guanyu: '⚔️', zhaoyun: '🐉', xunyu: '📚', zhangfei: '🔥', huatuo: '💊', chenlin: '📝', liubei: '👑', zhugeliang: '🪶' }
-const agentNames = { guanyu: '关羽', zhaoyun: '赵云', xunyu: '荀彧', zhangfei: '张飞', huatuo: '华佗', chenlin: '陈琳', liubei: '刘备', zhugeliang: '诸葛亮' }
-const agentRoles = { guanyu: '后端开发', zhaoyun: '前端开发', xunyu: 'DBA', zhangfei: '测试', huatuo: '产品经理', chenlin: '文档', liubei: '项目经理', zhugeliang: '架构师' }
+let ws = null
+let pollTimer = null
 
-function statusText(s) { return { working: '工作中', idle: '空闲', error: '异常' }[s] || '未知' }
-
-onMounted(async () => {
+async function fetchDashboard() {
   try {
     const r = await fetch('/api/dashboard')
     const d = await r.json()
     stats.value = d.stats || {}
-    pipeline.value = d.pipeline || {}
-    recent_fixes.value = d.recent_fixes || []
+    agents.value = d.agents || []
+    recent.value = d.recent || []
+    queue.value = d.queue || []
+    dispatcher.value = d.dispatcher || {}
+    await nextTick()
+    if (queueRef.value) queueRef.value.scrollTop = queueRef.value.scrollHeight
+  } catch {}
+}
 
-    agents.value = (d.agents || []).map(a => ({
-      ...a,
-      icon: agentIcons[a.id] || '🤖',
-      name: agentNames[a.id] || a.id,
-      role: agentRoles[a.id] || a.role,
-    }))
-  } catch (e) {
-    // Fallback mock data
-    agents.value = Object.keys(agentIcons).map(id => ({
-      id, icon: agentIcons[id], name: agentNames[id], role: agentRoles[id],
-      status: 'idle', success_rate: '0%', avg_time: '0s'
-    }))
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  ws = new WebSocket(`${proto}://${location.host}/ws`)
+  ws.onopen = () => { wsConnected.value = true }
+  ws.onclose = () => { wsConnected.value = false; setTimeout(connectWs, 3000) }
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      if (msg.event === 'tick') {
+        lastTick.value = msg.data.ts
+        stats.value.running_agents = msg.data.agents
+      } else if (msg.event === 'fix_done') {
+        fetchDashboard()
+      } else if (msg.event === 'feishu_trigger') {
+        feishuEvents.value.unshift({ time: msg.data.ts, message: msg.data.message })
+        if (feishuEvents.value.length > 20) feishuEvents.value.pop()
+      }
+    } catch {}
   }
+}
+
+onMounted(() => {
+  fetchDashboard()
+  connectWs()
+  pollTimer = setInterval(fetchDashboard, 15000)
+})
+
+onUnmounted(() => {
+  if (ws) ws.close()
+  clearInterval(pollTimer)
 })
 </script>
 
 <style scoped>
-.dashboard h1 { font-size: 24px; margin-bottom: 24px; }
+.dashboard { padding: 0; }
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.header h1 { font-size: 22px; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.ws-status { font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+.ws-status.online { background: #052e16; color: #22c55e; }
+.ws-status.offline { background: #450a0a; color: #ef4444; }
+.last-tick { font-size: 12px; color: #64748b; font-family: monospace; }
 
-.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
-.stat-card {
-  background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155;
-}
-.stat-card.success { border-left: 4px solid #22c55e; }
-.stat-card.warning { border-left: 4px solid #f59e0b; }
-.stat-card.info { border-left: 4px solid #3b82f6; }
-.stat-value { font-size: 32px; font-weight: 700; color: #f8fafc; }
-.stat-label { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+.stat-card { background: #1e293b; border-radius: 10px; padding: 16px; border: 1px solid #334155; }
+.stat-card.success { border-left: 3px solid #22c55e; }
+.stat-card.warning { border-left: 3px solid #f59e0b; }
+.stat-card.info { border-left: 3px solid #3b82f6; }
+.stat-value { font-size: 28px; font-weight: 700; }
+.stat-label { font-size: 12px; color: #94a3b8; margin-top: 2px; }
 
-.section { margin-bottom: 32px; }
-.section h2 { font-size: 18px; margin-bottom: 16px; color: #cbd5e1; }
+.section { margin-bottom: 24px; }
+.section h2 { font-size: 15px; margin-bottom: 12px; color: #cbd5e1; }
 
-.agent-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.agent-card {
-  background: #1e293b; border-radius: 10px; padding: 16px; border: 1px solid #334155;
-  transition: transform 0.2s;
-}
-.agent-card:hover { transform: translateY(-2px); }
-.agent-card.working { border-color: #22c55e; }
-.agent-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.agent-icon { font-size: 20px; }
-.agent-name { font-weight: 600; font-size: 14px; }
-.agent-status-badge {
-  margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 10px;
-}
-.agent-status-badge.working { background: #052e16; color: #22c55e; }
-.agent-status-badge.idle { background: #1e293b; color: #64748b; }
-.agent-status-badge.error { background: #450a0a; color: #ef4444; }
-.agent-role { font-size: 12px; color: #64748b; margin-bottom: 8px; }
-.agent-stats { display: flex; justify-content: space-between; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
-.agent-bar { height: 4px; background: #334155; border-radius: 2px; }
-.agent-bar-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); border-radius: 2px; transition: width 0.5s; }
+.agent-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.agent-card { background: #1e293b; border-radius: 10px; padding: 14px; border: 1px solid #334155; transition: all 0.2s; }
+.agent-card.working { border-color: #22c55e; box-shadow: 0 0 12px rgba(34,197,94,0.1); }
+.agent-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.agent-icon { font-size: 18px; }
+.agent-name { font-weight: 600; font-size: 13px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; margin-left: auto; }
+.status-dot.working { background: #22c55e; animation: pulse 1.5s infinite; }
+.status-dot.idle { background: #475569; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+.agent-role { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+.agent-meta { font-size: 11px; margin-bottom: 6px; min-height: 16px; }
+.current-bug { color: #22c55e; }
+.idle-text { color: #475569; }
+.agent-stats-row { display: flex; justify-content: space-between; font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
+.bar { height: 3px; background: #334155; border-radius: 2px; }
+.bar-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); border-radius: 2px; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+
+.queue-scroll { background: #1e293b; border: 1px solid #334155; border-radius: 10px; max-height: 200px; overflow-y: auto; }
+.queue-item { display: flex; gap: 12px; padding: 8px 14px; border-bottom: 1px solid #1e293b; font-size: 13px; }
+.queue-item:nth-child(even) { background: #0f172a; }
+.q-bug { color: #60a5fa; font-family: monospace; width: 50px; }
+.q-agent { color: #f59e0b; width: 60px; }
+.q-source { color: #64748b; }
+
+.dispatcher-box, .feishu-box { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 14px; }
+.d-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #334155; font-size: 13px; }
+.d-label { color: #64748b; }
+.d-value { color: #e2e8f0; font-weight: 500; }
+.feishu-item { display: flex; gap: 10px; padding: 6px 0; font-size: 12px; border-bottom: 1px solid #334155; }
+.f-time { color: #64748b; font-family: monospace; width: 60px; }
+.f-msg { color: #94a3b8; }
+.empty { color: #475569; font-size: 13px; padding: 12px; text-align: center; }
 
 .fix-table { width: 100%; border-collapse: collapse; }
-.fix-table th, .fix-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #334155; font-size: 13px; }
+.fix-table th, .fix-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155; font-size: 13px; }
 .fix-table th { color: #64748b; font-weight: 500; }
-.bug-id { font-family: monospace; color: #60a5fa; }
-.status-badge { padding: 2px 8px; border-radius: 4px; font-size: 12px; }
-.status-badge.ok { background: #052e16; color: #22c55e; }
-.status-badge.fail { background: #450a0a; color: #ef4444; }
-
-.pipeline-info { display: flex; gap: 24px; }
-.pipeline-item { background: #1e293b; padding: 16px 24px; border-radius: 10px; border: 1px solid #334155; }
-.pipeline-label { display: block; font-size: 12px; color: #64748b; margin-bottom: 4px; }
-.pipeline-value { font-size: 20px; font-weight: 600; }
+.mono { font-family: monospace; color: #60a5fa; }
+.ts { color: #64748b; font-size: 11px; }
+.badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+.badge.ok { background: #052e16; }
+.badge.fail { background: #450a0a; }
 </style>
