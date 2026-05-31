@@ -81,6 +81,11 @@ enum Cli {
     Optimize,
     /// L5: Show agent scores for smart routing
     Scores,
+    /// Start web dashboard server
+    Web {
+        #[arg(long, default_value = "3100")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -218,6 +223,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:<12} {:>8.1} {:>9.0}% {:>7.0}s",
                     s.agent_id, s.overall_score, s.success_rate, s.avg_duration_s);
             }
+        }
+        Cli::Web { port } => {
+            let pool = sqlx::SqlitePool::connect("sqlite:///var/lib/agentforge/traces.db?mode=rwc").await.ok();
+            agentforge::core::web_server::start_web_server(pool, port).await?;
         }
     }
 

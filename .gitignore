@@ -14,3 +14,8 @@ config/local/
 
 # Real config (use agentforge.yaml.example as template)
 config/agentforge.yaml
+
+# Web panel
+web/node_modules/
+web/dist/
+static/
