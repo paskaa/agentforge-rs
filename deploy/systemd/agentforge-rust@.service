@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentForge Rust Executor - %i
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/agentforge-rs
+Environment=RUST_LOG=info
+Environment=CONFIG_PATH=/root/agentforge-rs/config/agentforge.yaml
+ExecStart=/usr/local/bin/agentforge executor --agent %i
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

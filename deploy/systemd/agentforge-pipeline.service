@@ -1,0 +1,14 @@
+[Unit]
+Description=AgentForge Pipeline - 批量修 Bug
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/agentforge-rs
+ExecStart=/usr/local/bin/agentforge pipeline --max-bugs 10
+Restart=on-failure
+RestartSec=30
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
