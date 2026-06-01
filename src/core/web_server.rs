@@ -757,7 +757,7 @@ async fn bug_verification_api(
     // Get the latest verification report for this bug
     let output = std::process::Command::new("sqlite3")
         .args([db_path, "-json", &format!(
-            "SELECT ts, agent_id, event, COALESCE(message,'') as message, COALESCE(status,'') as status, COALESCE(duration_ms,0) as duration_ms, COALESCE(detail,'null') as detail FROM traces WHERE task_id LIKE '%{}%' AND event IN ('verification','verify_start','verify_done','verify_read_testdoc','verify_diff') ORDER BY ts ASC", bug_id
+            "SELECT ts, agent_id, event, COALESCE(message,'') as message, COALESCE(status,'') as status, COALESCE(duration_ms,0) as duration_ms, COALESCE(detail,'null') as detail FROM traces WHERE task_id LIKE '%{}%' AND event IN ('verification','verify_start','verify_done','verify_read_testdoc','verify_diff','test_generated','baseline_test','regression_test','test_done') ORDER BY ts ASC", bug_id
         )])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())

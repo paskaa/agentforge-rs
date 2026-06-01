@@ -713,6 +713,7 @@ fn run_codex_fix_impl(
 
     // Step 1.7: 自动生成 Playwright 测试用例（修复前先设计测试）
     let test_gen_script = "/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/utils/generate-bug-test.sh";
+    let mut test_generated = false;
     if std::path::Path::new(test_gen_script).exists() && agent_name == "zhaoyun" {
         let test_output = Command::new("bash")
             .arg(test_gen_script)
@@ -724,8 +725,12 @@ fn run_codex_fix_impl(
                 let stdout = String::from_utf8_lossy(&o.stdout).to_string();
                 if stdout.contains("OK:") {
                     tracing::info!("[{}] Bug#{} Playwright 测试用例已生成", agent_name, bug_id);
+                    tracing::info!("[{}] Bug#{} 测试用例已生成: tests/e2e/specs/bug-{}.spec.ts", agent_name, bug_id, bug_id);
+                    test_generated = true;
                 } else if stdout.contains("SKIP:") {
                     tracing::info!("[{}] Bug#{} Playwright 测试用例已存在", agent_name, bug_id);
+                    tracing::info!("[{}] Bug#{} 测试用例已存在", agent_name, bug_id);
+                    test_generated = true;
                 }
             }
             Err(e) => tracing::warn!("[{}] 生成测试用例失败: {}", agent_name, e),
@@ -736,14 +741,39 @@ fn run_codex_fix_impl(
     let test_spec = format!("/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/specs/bug-{}.spec.ts", bug_id);
     let pre_test_passed = if std::path::Path::new(&test_spec).exists() && agent_name == "zhaoyun" {
         tracing::info!("[{}] Bug#{} 运行修复前基线测试...", agent_name, bug_id);
+        tracing::info!("[{}] Bug#{} 开始修复前基线测试（预期失败）", agent_name, bug_id);
         let pre_test = Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1 | tail -20",
+                "cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1",
                 bug_id
             ))
             .output();
-        let passed = pre_test.map(|o| o.status.success()).unwrap_or(false);
+        let (passed, output) = match pre_test {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                let combined = format!("{}{}", stdout, stderr);
+                let passed = o.status.success();
+                (passed, combined)
+            }
+            Err(e) => (false, format!("执行失败: {}", e)),
+        };
+        // 截取关键日志（最后 500 字符）
+        let log_summary = if output.len() > 500 {
+            format!("...{}", &output[output.len()-500..])
+        } else {
+            output.clone()
+        };
+        let detail = serde_json::json!({
+            "phase": "baseline",
+            "passed": passed,
+            "expected": "fail",
+            "log": log_summary,
+            "full_output_len": output.len(),
+        });
+        tracing::info!("[{}] Bug#{} 基线测试结果: {} (detail={})", agent_name, bug_id, 
+            if passed { "通过(异常)" } else { "失败(预期)" }, detail);
         tracing::info!("[{}] Bug#{} 修复前基线测试: {}", agent_name, bug_id, if passed { "通过(异常)" } else { "失败(预期)" });
         passed
     } else {
