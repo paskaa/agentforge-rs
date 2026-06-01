@@ -1256,6 +1256,22 @@ impl AgentExecutor {
         
         let _ = self.feishu.send(&report, None).await;
         self.traces.log("liubei", "report_done", None, Some(&report), None, None, None, Some("ok"), None).await;
+
+        // 归档：将报告写入 bug_reports 表
+        {
+            let pool = &self.traces.pool;
+            let _ = sqlx::query(
+                r#"INSERT OR REPLACE INTO bug_reports (bug_id, agent, status, title, detail, updated_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))"#,
+            )
+            .bind(0i64)
+            .bind("pipeline")
+            .bind("pipeline_report")
+            .bind("Pipeline Report")
+            .bind(&report)
+            .execute(pool)
+            .await;
+        }
         self.traces.publish_trace_for_ws("liubei", "report_done", "", "报告完成", "ok", 0).await;
     }
     async fn handle_chat_hermes(&self, msg: &str, task: &Task) -> bool {

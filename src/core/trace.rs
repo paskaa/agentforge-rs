@@ -66,6 +66,26 @@ impl TraceStore {
         .await?;
 
         sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                bug_id INTEGER PRIMARY KEY,
+                agent TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                title TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                commit_hash TEXT NOT NULL DEFAULT '',
+                git_diff TEXT NOT NULL DEFAULT '',
+                report_md TEXT NOT NULL DEFAULT '',
+                zentao_commented INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_traces_agent_ts ON traces(agent_id, ts)",
         )
         .execute(&pool)
@@ -79,7 +99,37 @@ impl TraceStore {
     }
 
     /// Log a trace event.
-    pub async fn log(
+        /// Save a bug report to the bug_reports table (chenlin archival)
+    pub async fn save_report(
+        &self,
+        bug_id: i64,
+        agent: &str,
+        status: &str,
+        title: &str,
+        detail: &str,
+        commit_hash: &str,
+        git_diff: &str,
+        report_md: &str,
+    ) {
+        let _ = sqlx::query(
+            r#"INSERT OR REPLACE INTO bug_reports
+               (bug_id, agent, status, title, detail, commit_hash, git_diff, report_md, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))"#,
+        )
+        .bind(bug_id)
+        .bind(agent)
+        .bind(status)
+        .bind(title)
+        .bind(detail)
+        .bind(commit_hash)
+        .bind(git_diff)
+        .bind(report_md)
+        .execute(&self.pool)
+        .await;
+    }
+
+    /// Log a trace event.
+pub async fn log(
         &self,
         agent_id: &str,
         event: &str,
