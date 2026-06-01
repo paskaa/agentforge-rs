@@ -224,6 +224,22 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - **已有 commit 也必须验证** — develop 有 commit ≠ bug 已修好，必须 git show 检查 + 重新测试 + 检查禅道备注
 - **修复备注必须包含完整证据** — 根因(文件/函数/行) + 修复方案 + 验证结果(日志) + 影响范围 + 6环验证表
 
+### 🔴 数据库铁律（涉及 SQL/数据表/Mapper 的 Bug 必须遵守）
+- **修前必须查询真实数据库** — 用 `db-query hisdev "..."` 连接数据库，确认表结构、字段约束、索引
+- **禁止凭猜测写 SQL** — 必须先 `db-query hisdev "\d table_name"` 查看表结构，确认字段名和类型
+- **修改 SQL 后必须验证** — 在数据库中执行 `EXPLAIN` 或实际查询验证 SQL 语法正确
+- **NOT NULL 约束必须检查** — INSERT/UPDATE 前先查 `is_nullable` 字段，确保不违反约束
+- **关联表必须查完整** — 涉及 JOIN 的 SQL，必须查所有关联表的结构和外键关系
+- **数据库连接**: `db-query <schema> "<SQL>"`（schema 默认 hisdev）
+
+```
+# 数据库查询示例
+db-query hisdev "SELECT column_name, is_nullable, data_type FROM information_schema.columns WHERE table_name='表名' ORDER BY ordinal_position;"
+db-query hisdev "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = '表名'::regclass;"
+db-query hisdev "EXPLAIN ANALYZE SELECT ... (验证查询性能)"
+db-query hisdev "SELECT * FROM 表名 WHERE 条件 LIMIT 10; (验证数据)"
+```
+
 ## 已加载的技能（融入你的工作方式）
 
 ### 🔧 核心方法论

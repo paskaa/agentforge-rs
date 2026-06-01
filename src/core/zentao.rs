@@ -461,6 +461,72 @@ impl BugDetail {
             output.push_str("### 重现步骤\n");
             output.push_str(&self.steps);
             output.push_str("\n\n");
+
+            // ── 附件图片 OCR：下载并提取文字 ──
+            {
+                let token_file = std::path::Path::new("/root/.config/zentao/.env");
+                let mut zentao_token = String::new();
+                if let Ok(fc) = std::fs::read_to_string(token_file) {
+                    for line in fc.lines() {
+                        if let Some(v) = line.strip_prefix("ZENTAO_TOKEN=") {
+                            zentao_token = v.trim().to_string();
+                        }
+                    }
+                }
+                if !zentao_token.is_empty() {
+                    // 简单提取 fileID（不用 regex）
+                    let mut file_ids: Vec<String> = Vec::new();
+                    let steps_str = self.steps.clone();
+                    let mut pos = 0;
+                    while let Some(idx) = steps_str[pos..].find("fileID=") {
+                        let start = pos + idx + 7;
+                        let mut end = start;
+                        while end < steps_str.len() && steps_str.as_bytes()[end].is_ascii_digit() {
+                            end += 1;
+                        }
+                        if end > start {
+                            file_ids.push(steps_str[start..end].to_string());
+                        }
+                        pos = end;
+                    }
+                    if !file_ids.is_empty() {
+                        output.push_str("### 附件图片内容（OCR 提取）\n");
+                        for fid in &file_ids {
+                            let url = format!("https://zentao.gentronhealth.com/api.php/v1/files/{}", fid);
+                            let tmp_path = format!("/tmp/zentao_img_{}.png", fid);
+                            // 用 curl 下载（避免 reqwest blocking 依赖）
+                            let dl_ok = std::process::Command::new("curl")
+                                .args(["-s", "-o", &tmp_path, "-H", &format!("Token: {}", zentao_token), &url])
+                                .output()
+                                .map(|o| o.status.success())
+                                .unwrap_or(false);
+                            if dl_ok && std::path::Path::new(&tmp_path).exists() {
+                                let file_size = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+                                if file_size > 100 {
+                                    // OCR 提取文字
+                                    let ocr_result = std::process::Command::new("tesseract")
+                                        .args([&tmp_path, "stdout", "-l", "chi_sim+eng", "--psm", "6"])
+                                        .output()
+                                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                                        .unwrap_or_default();
+                                    let ocr_text = ocr_result.trim().to_string();
+                                    if !ocr_text.is_empty() {
+                                        output.push_str(&format!("**图片 {} (fileID={}):**\n```\n{}\n```\n\n",
+                                            fid, fid, ocr_text));
+                                    } else {
+                                        output.push_str(&format!("**图片 {} (fileID={}):** OCR 未能提取文字（可能是纯图形截图）\n\n", fid, fid));
+                                    }
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                } else {
+                                    output.push_str(&format!("**图片 {} (fileID={}):** 文件过小({} bytes)，可能下载失败\n\n", fid, fid, file_size));
+                                }
+                            } else {
+                                output.push_str(&format!("**图片 {} (fileID={}):** 下载失败\n\n", fid, fid));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // 备注/操作历史（只显示有 comment 或重要状态变更的）

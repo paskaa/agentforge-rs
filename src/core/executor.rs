@@ -1212,7 +1212,7 @@ impl AgentExecutor {
             let sender = msg.split("修复 Agent:").nth(1).and_then(|s| s.split(',').next()).map(|s| s.trim()).unwrap_or("zhaoyun");
             let rework_msg = format!("Bug #{} DB 审查未通过：需要创建 DB 迁移脚本。请补充。", bid);
             let pipe_task = serde_json::json!({
-                "agent_id": sender,
+                "agent_id": "zhangfei",
                 "message": rework_msg,
                 "source": "pipeline_retry",
                 "sender_id": "xunyu",
