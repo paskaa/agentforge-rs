@@ -10,6 +10,8 @@ import Agents from './views/Agents.vue'
 import AgentDetail from './views/AgentDetail.vue'
 import Queues from './views/Queues.vue'
 import BugList from './views/BugList.vue'
+import Reports from './views/Reports.vue'
+import ReportDetail from './views/ReportDetail.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -20,6 +22,8 @@ const router = createRouter({
     { path: '/queues', component: Queues },
     { path: '/agent/:id', component: AgentDetail, props: true },
     { path: '/bugs/:filter', component: BugList, props: true },
+    { path: '/reports', component: Reports },
+    { path: '/report/:id', component: ReportDetail, props: true },
   ]
 })
 

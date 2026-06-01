@@ -815,6 +815,47 @@ async fn bug_traces_api(
     Json(serde_json::json!({"bug_id": bug_id, "traces": traces, "count": traces.len()}))
 }
 
+async fn bug_report_api(
+    axum::extract::Path(bug_id): axum::extract::Path<String>,
+    State(s): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Some(ref pool) = s.pool {
+        if let Ok(row) = sqlx::query_as::<_, (String,String,String,String,String,String,String,i64,String)>(
+            "SELECT bug_id, COALESCE(title,''), COALESCE(reporter,''), COALESCE(commit_hash,''), COALESCE(test_result,''), COALESCE(report_md,''), COALESCE(fix_files,'[]'), COALESCE(duration_ms,0), COALESCE(created_at,'') FROM bug_reports WHERE bug_id = ?1"
+        ).bind(&bug_id).fetch_optional(pool).await {
+            if let Some((bid,title,rep,hash,test,md,files,dur,created)) = row {
+                return Json(serde_json::json!({
+                    "bug_id": bid, "title": title, "reporter": rep,
+                    "commit_hash": hash, "test_result": test,
+                    "report_md": md, "fix_files": serde_json::from_str::<serde_json::Value>(&files).unwrap_or(serde_json::json!([])),
+                    "duration_ms": dur, "created_at": created
+                }));
+            }
+        }
+    }
+    Json(serde_json::json!({"error": "not found"}))
+}
+
+async fn bug_reports_api(
+    State(s): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Some(ref pool) = s.pool {
+        if let Ok(rows) = sqlx::query_as::<_, (String,String,String,String,String,i64,String)>(
+            "SELECT bug_id, COALESCE(title,''), COALESCE(reporter,''), COALESCE(commit_hash,''), COALESCE(test_result,''), COALESCE(duration_ms,0), COALESCE(created_at,'') FROM bug_reports ORDER BY created_at DESC LIMIT 100"
+        ).fetch_all(pool).await {
+            let reports: Vec<serde_json::Value> = rows.iter().map(|(bid,title,rep,hash,test,dur,created)| {
+                serde_json::json!({
+                    "bug_id": bid, "title": title, "reporter": rep,
+                    "commit_hash": hash, "test_result": test,
+                    "duration_ms": dur, "created_at": created
+                })
+            }).collect();
+            return Json(serde_json::json!({"reports": reports, "count": reports.len()}));
+        }
+    }
+    Json(serde_json::json!({"reports": [], "count": 0}))
+}
+
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/root/agentforge-rs/static".into());
 
     // Start background ticker
@@ -829,7 +870,9 @@ async fn bug_traces_api(
         .route("/api/agent/:id/traces", get(agent_traces))
         .route("/api/agent/:id/traces/rt", get(agent_traces_realtime))
         .route("/api/agent/:id/queue", get(agent_queue_api))
-        .route("/api/bugs/:id/traces", get(bug_traces_api))
+                .route("/api/bugs/:id/traces", get(bug_traces_api))
+        .route("/api/bugs/:id/report", get(bug_report_api))
+        .route("/api/bugs/reports", get(bug_reports_api))
         .route("/api/bugs/:id/verification", get(bug_verification_api))
         .route("/api/queues", get(queues_api))
         .route("/api/zentao/stats", get(zentao_stats_api))

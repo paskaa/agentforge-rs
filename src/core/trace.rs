@@ -26,7 +26,7 @@ pub struct AgentSummary {
 }
 
 pub struct TraceStore {
-    pool: SqlitePool,
+    pub pool: SqlitePool,
 }
 
 impl TraceStore {

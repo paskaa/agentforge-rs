@@ -34,6 +34,10 @@
           <el-icon><TrendCharts /></el-icon>
           <span>L4 分析</span>
         </el-menu-item>
+        <el-menu-item index="/reports">
+          <el-icon><Document /></el-icon>
+          <span>归档报告</span>
+        </el-menu-item>
       </el-menu>
       <div class="nav-footer">
         <el-tag :type="connected ? 'success' : 'danger'" size="small" effect="dark">
@@ -50,7 +54,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { DataBoard, Warning, User, List, TrendCharts } from '@element-plus/icons-vue'
+import { DataBoard, Warning, User, List, TrendCharts, Document } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const connected = ref(false)
