@@ -1,6 +1,9 @@
 <template>
   <div class="dashboard">
-    <h1 style="margin-bottom:20px;font-size:22px">📊 仪表盘</h1>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <h1 style="font-size:22px;margin:0">📊 仪表盘</h1>
+      <el-button :icon="Refresh" circle :loading="refreshing" @click="refreshAll" size="small" title="刷新禅道数据" />
+    </div>
 
     <!-- 统计卡片 -->
     <el-row :gutter="16" style="margin-bottom:20px">
@@ -25,7 +28,7 @@
       <el-col :span="6">
         <router-link to="/bugs/fixed_today" style="text-decoration:none;color:inherit">
           <el-card shadow="hover" class="stat-card success" body-style="padding:20px">
-            <el-statistic title="今日修复" :value="stats.fixed_today || 0">
+            <el-statistic title="今日修复" :value="zentao.fixed_today || 0">
               <template #suffix><span style="font-size:12px;color:#22c55e">🔍</span></template>
             </el-statistic>
           </el-card>
@@ -130,6 +133,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Link } from '@element-plus/icons-vue'
 
+import { Refresh } from '@element-plus/icons-vue'
 const stats = ref({})
 const zentao = ref({})
 const agents = ref([])
@@ -145,13 +149,15 @@ const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detailData = ref(null)
 const detailTraces = ref([])
+const refreshing = ref(false)
 let pollTimer = null
 
-async function fetchAll() {
+async function fetchAll(forceRefresh = false) {
   try {
+    const zenUrl = forceRefresh ? '/api/zentao/stats?refresh=true' : '/api/zentao/stats'
     const [dashRes, zenRes] = await Promise.all([
       fetch('/api/dashboard'),
-      fetch('/api/zentao/stats')
+      fetch(zenUrl)
     ])
     const dash = await dashRes.json()
     const zen = await zenRes.json()
@@ -160,6 +166,12 @@ async function fetchAll() {
     recent.value = dash.recent || []
     zentao.value = zen
   } catch {}
+}
+
+async function refreshAll() {
+  refreshing.value = true
+  await fetchAll(true)
+  refreshing.value = false
 }
 
 onMounted(() => {

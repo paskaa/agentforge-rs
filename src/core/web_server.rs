@@ -231,30 +231,44 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         });
     }
 
-    // Stats
-    if let Some(ref pool) = s.pool {
-        // 今日活跃 Bug 数（所有启动事件）
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let today_pattern = format!("{}%", today);
-        if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traces WHERE event IN ('fix_start','test_start','verify_start','task_start','pm_routed') AND ts LIKE ?1")
-            .bind(&today_pattern).fetch_one(pool).await { r.stats.total = v; }
-        // 今日成功完成数
-        let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND status = 'ok' AND ts LIKE ?1")
-            .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
-        // 今日总完成数
-        let tot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND ts LIKE ?1")
-            .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
-        r.stats.fixed_today = ok;
-        r.stats.rate = if tot > 0 { format!("{:.1}%", ok as f64 / tot as f64 * 100.0) } else { "N/A".into() };
-
-        if let Ok(rows) = sqlx::query_as::<_, (String,String,String,i64,String)>(
-            "SELECT COALESCE(task_id,'?'), agent_id, COALESCE(status,'?'), COALESCE(duration_ms,0), COALESCE(ts,'') FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done','fix_start','test_start','verify_start','pm_routed') ORDER BY ts DESC LIMIT 50"
-        ).fetch_all(pool).await {
-            for (bid,aid,st,dur,ts) in rows {
-                r.recent.push(FixRow { bug: bid.replace("Bug#",""), agent: aid, ok: st=="ok", dur: format!("{:.0}s",dur as f64/1000.0), ts });
+    // Stats — use zentao cache for real bug counts
+    {
+        let cache = s.zentao_cache.read().await;
+        if let Some((ref json, _ts)) = *cache {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+                r.stats.total = v.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
+                r.stats.fixed_today = v.get("fixed_today").and_then(|x| x.as_i64()).unwrap_or(0);
+                let unc = v.get("unclosed").and_then(|x| x.as_i64()).unwrap_or(0);
+                let unres = v.get("unresolved").and_then(|x| x.as_i64()).unwrap_or(0);
+                r.stats.rate = if unc > 0 { format!("{:.1}%", (unc - unres) as f64 / unc as f64 * 100.0) } else { "N/A".into() };
             }
         }
     }
+    // Fallback: traces-based stats if zentao cache empty
+    if r.stats.total == 0 {
+        if let Some(ref pool) = s.pool {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let today_pattern = format!("{}%", today);
+            if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(DISTINCT task_id) FROM traces WHERE event IN ('fix_start','test_start','verify_start','task_start','pm_routed') AND ts LIKE ?1")
+                .bind(&today_pattern).fetch_one(pool).await { r.stats.total = v; }
+            let ok: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT task_id) FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND status = 'ok' AND ts LIKE ?1")
+                .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
+            let tot: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT task_id) FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND ts LIKE ?1")
+                .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
+            r.stats.fixed_today = ok;
+            r.stats.rate = if tot > 0 { format!("{:.1}%", ok as f64 / tot as f64 * 100.0) } else { "N/A".into() };
+        }
+    }
+
+        if let Some(ref pool) = s.pool {
+            if let Ok(rows) = sqlx::query_as::<_, (String,String,String,i64,String)>(
+                "SELECT COALESCE(task_id,'?'), agent_id, COALESCE(status,'?'), COALESCE(duration_ms,0), COALESCE(ts,'') FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done','fix_start','test_start','verify_start','pm_routed') ORDER BY ts DESC LIMIT 50"
+            ).fetch_all(pool).await {
+                for (bid,aid,st,dur,ts) in rows {
+                    r.recent.push(FixRow { bug: bid.replace("Bug#",""), agent: aid, ok: st=="ok", dur: format!("{:.0}s",dur as f64/1000.0), ts });
+                }
+            }
+        }
 
     Json(r)
 }
