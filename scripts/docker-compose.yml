@@ -1,0 +1,26 @@
+# AgentForge-RS 基础设施服务
+# 用法: docker-compose -f scripts/docker-compose.yml up -d
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: agentforge-redis
+    restart: always
+    ports:
+      - "16379:6379"
+    volumes:
+      - /data/agentforge-redis:/data
+    command: redis-server --appendonly yes
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentforge-pg
+    restart: always
+    ports:
+      - "15432:5432"
+    environment:
+      POSTGRES_PASSWORD: Jchl1528
+      POSTGRES_DB: postgresql
+    volumes:
+      - /data/agentforge-pg:/var/lib/postgresql/data

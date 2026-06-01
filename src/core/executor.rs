@@ -473,10 +473,64 @@ impl AgentExecutor {
                 tr_v.publish_trace_for_ws(&an_v, "verification", &format!("Bug#{}", bid_v),
                     &verification.summary, if verification.all_passed {"ok"} else {"failed"}, 
                     verification.total_ms as i64).await;
-                // 验证失败 → 加入失败集合（不阻塞 executor）
+                // 验证失败 → 反馈给智能体进行二次修复
                 if !verification.all_passed {
                     tracing::warn!("[{}] Bug #{} 全链路验证失败: {}", an_v, bid_v, verification.summary);
                     let _: redis::RedisResult<()> = redis_v.sadd(format!("agent-failed-bugs:{}", an_v), &bid_v).await;
+                    
+                    // 检查验证重试次数（最多 2 次）
+                    let retry_key = format!("verify_retry:{}:{}", an_v, bid_v);
+                    let retry_count: i32 = redis_v.clone().get(&retry_key).await.unwrap_or(0);
+                    let _: redis::RedisResult<()> = redis_v.clone().set_ex(&retry_key, retry_count + 1, 3600).await;
+                    
+                    if retry_count < 2 {
+                        // 构建失败反馈消息，包含详细失败原因
+                        let failed_checks: Vec<String> = verification.checks.iter()
+                            .filter(|c| !c.passed)
+                            .map(|c| format!("- {} ❌: {}", c.name, c.message.lines().next().unwrap_or("")))
+                            .collect();
+                        let retry_msg = format!(
+                            "【验证失败反馈】Bug #{} 上次修复未通过全链路验证，请根据以下失败原因重新修复：
+
+失败原因：
+{}
+
+总耗时: {}ms
+
+请针对上述失败项重新修复，确保：
+1. 编译通过（vite build / mvn compile）
+2. 单元测试通过（vitest / mvn test）
+3. Playwright 回归测试通过
+4. 数据库表可访问
+5. 后端服务可达",
+                            bid_v, failed_checks.join("
+"), verification.total_ms
+                        );
+                        
+                        // 存储失败详情到 Redis（供 agent 读取）
+                        let detail_key = format!("verify_fail_detail:{}:{}", an_v, bid_v);
+                        let _: redis::RedisResult<()> = redis_v.clone().set_ex(&detail_key, &verify_detail, 3600).await;
+                        
+                        // 推送重试任务到 agent 队列
+                        let retry_task = serde_json::json!({
+                            "agent_id": an_v,
+                            "message": retry_msg,
+                            "source": "verify_retry",
+                            "sender_id": "verification",
+                            "chat_id": "",
+                            "is_dm": "true",
+                            "msg_id": format!("verify-retry-{}-{}-{}", bid_v, retry_count + 1, chrono::Local::now().timestamp()),
+                            "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        });
+                        let queue = format!("agent-work-queue:fix:{}", an_v);
+                        let _: redis::RedisResult<i64> = redis_v.clone().rpush(&queue, retry_task.to_string()).await;
+                        tracing::info!("[{}] Bug #{} 验证失败反馈已推送到队列 (重试 {}/2)", an_v, bid_v, retry_count + 1);
+                    } else {
+                        tracing::warn!("[{}] Bug #{} 验证重试已达上限(2次)，标记为最终失败", an_v, bid_v);
+                        // 存储最终失败标记
+                        let final_key = format!("verify_final_fail:{}:{}", an_v, bid_v);
+                        let _: redis::RedisResult<()> = redis_v.clone().set_ex(&final_key, &verify_detail, 86400).await;
+                    }
                 }
             });
 
