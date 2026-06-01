@@ -1182,8 +1182,39 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
         .args(["-C", &worktree, "commit", "-m", &final_msg])
         .output();
 
-    // Push to remote agent branch
+    // 铁律 #24: 修复后必须本地编译验证，禁止未编译就 push
     let branch = agent_name;
+    tracing::info!("[{}] Bug #{} 开始编译验证（push 前）...", agent_name, bug_id);
+    let compile_result = if agent_name == "zhaoyun" {
+        Command::new("npx")
+            .args(["vite", "build", "--mode", "dev"])
+            .current_dir(&worktree)
+            .output()
+    } else {
+        Command::new("mvn")
+            .args(["compile", "-q", "-pl", "openhis-application", "-am"])
+            .current_dir(format!("{}/openhis-server-new", worktree))
+            .output()
+    };
+    match compile_result {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            tracing::warn!("[{}] Bug #{} 编译失败，禁止 push: {}", agent_name, bug_id, stderr.chars().take(300).collect::<String>());
+            // 回滚 commit
+            let _ = Command::new("git")
+                .args(["-C", &worktree, "reset", "--hard", "HEAD~1"])
+                .output();
+            return; // 不 push，不 cherry-pick
+        }
+        Err(e) => {
+            tracing::warn!("[{}] Bug #{} 编译命令执行失败: {}，跳过编译检查继续 push", agent_name, bug_id, e);
+        }
+        _ => {
+            tracing::info!("[{}] Bug #{} 编译验证通过 ✅", agent_name, bug_id);
+        }
+    }
+
+    // Push to remote agent branch
     let push_result = Command::new("git")
         .args(["-C", &worktree, "push", "origin", branch])
         .output();
