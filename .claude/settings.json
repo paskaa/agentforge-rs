@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "handler": {
+          "type": "command",
+          "command": "FILE=\"$CLAUDE_FILE_PATH\"; EXT=\"${FILE##*.}\"; if [ \"$EXT\" = \"rs\" ]; then cd /root/agentforge-rs && cargo check 2>&1 | tail -3; fi"
+        }
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "handler": {
+          "type": "command",
+          "command": "echo \"$CLAUDE_FILE_PATH\" | grep -qE '(config/agentforge\\.yaml|\\.env|deploy/systemd/)' && echo 'BLOCKED: 生产配置文件禁止修改' && exit 2 || exit 0"
+        }
+      }
+    ],
+    "Stop": [
+      {
+        "handler": {
+          "type": "command",
+          "command": "cd /root/agentforge-rs && cargo check 2>&1 | tail -3; if [ $? -ne 0 ]; then echo '编译未通过，不能停止'; exit 1; fi"
+        }
+      }
+    ]
+  }
+}
