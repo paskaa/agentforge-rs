@@ -166,6 +166,13 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     let karpathy       = load_skill(&format!("{}/karpathy-guidelines/SKILL.md", skills_base));
     let full_chain     = load_skill(&format!("{}/full-chain-fix/SKILL.md", skills_base));
     let bdt            = load_skill(&format!("{}/bug-driven-testing/SKILL.md", skills_base));
+    // AgentForge 自定义技能
+    let af_fix         = load_skill(&format!("{}/agentforge-fix/SKILL.md", skills_base));
+    let af_test        = load_skill(&format!("{}/agentforge-test/SKILL.md", skills_base));
+    let af_verify      = load_skill(&format!("{}/agentforge-verify/SKILL.md", skills_base));
+    let af_archive     = load_skill(&format!("{}/agentforge-archive/SKILL.md", skills_base));
+    let af_db_review   = load_skill(&format!("{}/agentforge-db-review/SKILL.md", skills_base));
+    let af_analyze     = load_skill(&format!("{}/agentforge-analyze/SKILL.md", skills_base));
 
     let agents_md_path = "/root/.openclaw/workspace/his-repo/AGENTS.md";
     let agents_md_hint = load_skill(agents_md_path)
