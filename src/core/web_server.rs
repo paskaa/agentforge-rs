@@ -820,7 +820,7 @@ async fn bug_report_api(
     State(s): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if let Some(ref pool) = s.pool {
-        if let Ok(row) = sqlx::query_as::<_, (String,String,String,String,String,String,String,i64,String)>(
+        if let Ok(row) = sqlx::query_as::<_, (i64,String,String,String,String,String,String,i64,String)>(
             "SELECT bug_id, COALESCE(title,''), COALESCE(reporter,''), COALESCE(commit_hash,''), COALESCE(test_result,''), COALESCE(report_md,''), COALESCE(fix_files,'[]'), COALESCE(duration_ms,0), COALESCE(created_at,'') FROM bug_reports WHERE bug_id = ?1"
         ).bind(&bug_id).fetch_optional(pool).await {
             if let Some((bid,title,rep,hash,test,md,files,dur,created)) = row {
@@ -840,9 +840,10 @@ async fn bug_reports_api(
     State(s): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if let Some(ref pool) = s.pool {
-        if let Ok(rows) = sqlx::query_as::<_, (String,String,String,String,String,i64,String)>(
+        match sqlx::query_as::<_, (i64,String,String,String,String,i64,String)>(
             "SELECT bug_id, COALESCE(title,''), COALESCE(reporter,''), COALESCE(commit_hash,''), COALESCE(test_result,''), COALESCE(duration_ms,0), COALESCE(created_at,'') FROM bug_reports ORDER BY created_at DESC LIMIT 100"
         ).fetch_all(pool).await {
+            Ok(rows) => {
             let reports: Vec<serde_json::Value> = rows.iter().map(|(bid,title,rep,hash,test,dur,created)| {
                 serde_json::json!({
                     "bug_id": bid, "title": title, "reporter": rep,
@@ -851,6 +852,10 @@ async fn bug_reports_api(
                 })
             }).collect();
             return Json(serde_json::json!({"reports": reports, "count": reports.len()}));
+            }
+            Err(e) => {
+                tracing::error!("[bug_reports_api] query failed: {}", e);
+            }
         }
     }
     Json(serde_json::json!({"reports": [], "count": 0}))
