@@ -454,13 +454,18 @@ impl AgentExecutor {
             let m_v = m.clone();
             let tr_v = tr.clone();
             let mut redis_v = redis_clone.clone();
-            let work_dir = if an == "zhaoyun" { 
-                "/tmp/agentforge-worktrees/zhaoyun/openhis-ui-vue3".to_string()
-            } else { 
-                "/tmp/agentforge-worktrees/guanyu/openhis-server-new".to_string()
-            };
+            // 验证在 develop 分支上跑（main_repo），确保验证的是最终合入的代码
+            // 而不是 agent worktree 中的代码
+            let work_dir = "/root/.openclaw/workspace/his-repo/openhis-server-new".to_string();
             tokio::spawn(async move {
-                tracing::info!("[{}] Bug #{} 开始全链路验证...", an_v, bid_v);
+                // 确保在 develop 分支上验证（可能被其他 agent 切换过）
+                let _ = std::process::Command::new("git")
+                    .args(["-C", "/root/.openclaw/workspace/his-repo", "checkout", "develop"])
+                    .output();
+                let _ = std::process::Command::new("git")
+                    .args(["-C", "/root/.openclaw/workspace/his-repo", "pull", "--rebase", "origin", "develop"])
+                    .output();
+                tracing::info!("[{}] Bug #{} 开始全链路验证（develop 分支）...", an_v, bid_v);
                 let verification = super::verification::run_full_verification(&an_v, &bid_v, &m_v, &work_dir);
                 tracing::info!("[{}] Bug #{} 验证结果: {} ({}ms)", an_v, bid_v, verification.summary, verification.total_ms);
                 let verify_detail = serde_json::to_string(&verification).unwrap_or_default();

@@ -1207,30 +1207,10 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                     let _ = Command::new("git")
                         .args(["-C", main_repo, "pull", "--rebase", "origin", "develop"])
                         .output();
-                    // Check if develop already has this bug fix (dedup)
-                    let already_fixed = Command::new("git")
-                        .args(["-C", main_repo, "log", "--oneline", "origin/develop", "--grep",
-                               &format!("fix(#{}):", bug_id)])
-                        .output();
-                    let already_fixed_old = Command::new("git")
-                        .args(["-C", main_repo, "log", "--oneline", "origin/develop", "--grep",
-                               &format!("Fix Bug #{}", bug_id)])
-                        .output();
-                    // 检查 develop 上是否已有此 bug 的修复
-                    let already_fixed = match (&already_fixed, &already_fixed_old) {
-                        (Ok(a), Ok(b)) => {
-                            let out_a = String::from_utf8_lossy(&a.stdout).trim().to_string();
-                            let out_b = String::from_utf8_lossy(&b.stdout).trim().to_string();
-                            !out_a.is_empty() || !out_b.is_empty()
-                        }
-                        _ => false,
-                    };
-                    // 即使 develop 已有修复，也尝试 cherry-pick（可能有增量修复）
-                    // 只有当 diff 为空时才跳过
-                    let skip_cherry = false; // 总是尝试 cherry-pick
-                    if already_fixed {
-                        tracing::info!("[{}] Bug #{} develop 已有修复，尝试增量 cherry-pick", agent_name, bug_id);
-                    }
+                    // 铁律: 总是尝试 cherry-pick 到 develop
+                    // develop 上可能有旧的不完整修复，需要增量合并
+                    // 验证会在 develop 分支上跑，确认是否真正修好
+                    tracing::info!("[{}] Bug #{} 尝试 cherry-pick 到 develop", agent_name, bug_id);
 
                     {
                         // Try cherry-pick with -X theirs to auto-resolve simple conflicts
