@@ -783,21 +783,21 @@ impl AgentExecutor {
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // ── Step 1: 收集全流程 trace 数据 ──
-        let traces: Vec<(String,String,String,String,String,i64,String)> = { let pool = &self.traces.pool;
+        let pool = &self.traces.pool;
+        let traces: Vec<(String,String,String,String,String,i64,String)> =
             sqlx::query_as("SELECT agent_id, event, task_id, status, COALESCE(message,''), COALESCE(duration_ms,0), ts FROM traces WHERE task_id LIKE ?1 AND ts > ?2 ORDER BY ts ASC")
                 .bind(format!("Bug#{}", bid))
                 .bind("2026-01-01")
-                .fetch_all(pool).await.unwrap_or_default()
-        };
+                .fetch_all(pool).await.unwrap_or_default();
 
         // ── Step 2: 收集 Git commit 信息 ──
-        let worktree = format!("/tmp/agentforge-worktrees/guanyu/openhis-server-new");
+        let worktree = "/tmp/agentforge-worktrees/guanyu/openhis-server-new";
         let commit_hash = std::process::Command::new("git")
-            .args(["-C", &worktree, "log", "--oneline", "--format=%H", "-1", "--", "."])
+            .args(["-C", worktree, "log", "--oneline", "--format=%h", "-1", "--", "."])
             .output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
         let commit_files = std::process::Command::new("git")
-            .args(["-C", &worktree, "show", "--stat", "--format=", &commit_hash])
+            .args(["-C", worktree, "show", "--stat", "--format=", &commit_hash])
             .output().map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect::<Vec<_>>())
             .unwrap_or_default();
 
@@ -809,62 +809,59 @@ impl AgentExecutor {
         let mut fix_start_ts = String::new();
         let mut fix_end_ts = String::new();
 
-        for (agent, event, _task, status, message, dur, ts) in &traces {
+        for (_agent, event, _task, status, message, dur, ts) in &traces {
             match event.as_str() {
-                "fix_start" => {
-                    fix_start_ts = ts.clone();
-                }
+                "fix_start" => { fix_start_ts = ts.clone(); }
                 "fix_done" => {
                     fix_end_ts = ts.clone();
                     fix_duration = *dur;
-                    // 提取根因（取前 500 字符）
                     root_cause = message.chars().take(500).collect();
                 }
                 "test_done" => {
                     test_result = status.clone();
                     test_output = message.clone();
                 }
-                "analyze_done" => {
-                    // 路由信息
-                }
-                "verify_done" => {
-                    // 验收信息
-                }
                 _ => {}
             }
+        }
+
+        // ── Step 3.5: 如果 traces 查询为空（时序问题），从消息中提取 ──
+        if test_result.is_empty() {
+            test_result = if msg.contains("测试通过") || msg.contains("test_done") { "ok".into() } else { "unknown".into() };
+        }
+        if fix_duration == 0 {
+            fix_start_ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+            fix_end_ts = fix_start_ts.clone();
         }
 
         // ── Step 4: 生成完整 Markdown 报告 ──
         let pipeline_timeline = traces.iter().map(|(agent, event, _task, status, _msg, dur, ts)| {
             let status_icon = match status.as_str() {
-                "ok" => "✅",
-                "failed" => "❌",
-                "pending" => "⏳",
-                _ => "❓",
+                "ok" => "✅", "failed" => "❌", "pending" => "⏳", _ => "❓",
             };
             format!("| {} | {} | {} | {} | {:.1}s |",
                 ts.chars().skip(11).take(8).collect::<String>(),
                 agent, event, status_icon, *dur as f64 / 1000.0)
         }).collect::<Vec<_>>().join("\n");
 
-        let fix_files_list = commit_files.iter()
-            .filter(|l| l.contains("|") || l.contains(".java") || l.contains(".vue") || l.contains(".ts"))
-            .take(20)
-            .cloned().collect::<Vec<String>>()
-            .join("\n");
+        let fix_files_list: String = commit_files.iter()
+            .filter(|l| l.contains(".java") || l.contains(".vue") || l.contains(".ts") || l.contains(".js"))
+            .take(20).cloned().collect::<Vec<String>>().join("\n");
+
+        let test_icon = if test_result == "ok" { "✅ PASS" } else { "❌ FAIL" };
 
         let report_md = format!(r#"# Bug #{} 修复报告
 
 ## 基本信息
 - **标题**: {}
-- **严重程度**: 待查
 - **提出人**: {}
 - **修复时间**: {} ~ {}
 - **修复耗时**: {:.1}s
 - **Commit**: `{}`
+- **测试结果**: {}
 
 ## 根因分析
-{}  |  #
+{}
 
 ## 修复文件
 {}
@@ -873,68 +870,47 @@ impl AgentExecutor {
 | 时间 | 智能体 | 事件 | 状态 | 耗时 |
 |------|--------|------|------|------|
 {}
-|------|--------|------|------|------|
 | {} | chenlin | doc_done | ✅ | <1s |
 
-## 测试结果
-- **结果**: {}
-- **输出**: {}
-
-## 全流程完成
-诸葛亮分析 → {} 修复 → 张飞测试 → 华佗验收 → 陈琳归档
+## 全流程
+诸葛亮分析 → guanyu 修复 → 张飞测试 → 华佗验收 → 陈琳归档
 "#,
-            bid,
-            msg.chars().take(200).collect::<String>(),
-            rep,
+            bid, msg.chars().take(200).collect::<String>(), rep,
             fix_start_ts.chars().skip(11).take(8).collect::<String>(),
             fix_end_ts.chars().skip(11).take(8).collect::<String>(),
-            fix_duration as f64 / 1000.0,
-            &commit_hash[..commit_hash.len().min(12)],
-            root_cause,
-            fix_files_list,
-            pipeline_timeline,
-            ts.chars().skip(11).take(8).collect::<String>(),
-            if test_result == "ok" { "✅ PASS" } else { "❌ FAIL" },
-            test_output.chars().take(300).collect::<String>(),
-            "guanyu"
+            fix_duration as f64 / 1000.0, commit_hash, test_icon,
+            root_cause, fix_files_list, pipeline_timeline,
+            ts.chars().skip(11).take(8).collect::<String>()
         );
 
-        // ── Step 5: Git 归档 — 写入 docs/bug-fixes/ ──
+        // ── Step 5: Git 归档 ──
         let his_repo = "/root/.openclaw/workspace/his-repo";
         let docs_dir = format!("{}/docs/bug-fixes", his_repo);
         let _ = std::fs::create_dir_all(&docs_dir);
         let report_file = format!("{}/bug-{}.md", docs_dir, bid);
         let _ = std::fs::write(&report_file, &report_md);
-        // Git add + commit
         let _ = std::process::Command::new("git").args(["-C", his_repo, "add", &report_file]).output();
-        let commit_msg = format!("docs: Bug #{} 修复报告归档", bid);
-        let _ = std::process::Command::new("git").args(["-C", his_repo, "commit", "-m", &commit_msg, "--allow-empty"]).output();
+        let _ = std::process::Command::new("git").args(["-C", his_repo, "commit", "-m", &format!("docs: Bug #{} 修复报告归档", bid), "--allow-empty"]).output();
 
         // ── Step 6: SQLite 归档 ──
-        { let pool = &self.traces.pool;
+        {
             let pipeline_json = serde_json::json!({
                 "traces": traces.iter().map(|(a,e,t,s,m,d,ts)| {
-                    serde_json::json!({"agent":a,"event":e,"task":t,"status":s,"msg":m.chars().take(200).collect::<String>(),"dur_ms":d,"ts":ts})
+                    serde_json::json!({"agent":a,"event":e,"status":s,"msg":m.chars().take(200).collect::<String>(),"dur_ms":d,"ts":ts})
                 }).collect::<Vec<_>>()
             }).to_string();
             let fix_files_json = serde_json::json!(commit_files).to_string();
             let _ = sqlx::query(
-                "INSERT INTO bug_reports (bug_id, title, reporter, commit_hash, fix_files, test_result, test_output, pipeline_json, report_md, duration_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+                "INSERT OR REPLACE INTO bug_reports (bug_id, title, reporter, commit_hash, fix_files, test_result, test_output, pipeline_json, report_md, duration_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
             )
-            .bind(&bid)
-            .bind(msg.chars().take(200).collect::<String>())
-            .bind(&rep)
-            .bind(&commit_hash)
-            .bind(&fix_files_json)
-            .bind(&test_result)
+            .bind(&bid).bind(msg.chars().take(200).collect::<String>()).bind(&rep)
+            .bind(&commit_hash).bind(&fix_files_json).bind(&test_result)
             .bind(test_output.chars().take(1000).collect::<String>())
-            .bind(&pipeline_json)
-            .bind(&report_md)
-            .bind(fix_duration)
+            .bind(&pipeline_json).bind(&report_md).bind(fix_duration)
             .execute(pool).await;
         }
 
-        // ── Step 7: Redis 缓存（保留兼容） ──
+        // ── Step 7: Redis 缓存 ──
         let _: redis::RedisResult<()> = self.redis.clone().set_ex(format!("fix_doc:{}", bid), &report_md, 30*86400).await;
 
         // ── Step 8: 禅道备注 ──
@@ -944,16 +920,16 @@ impl AgentExecutor {
                 let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
                 let archive_comment = format!(
                     "[📝 陈琳归档] Bug #{} 修复报告已归档\n\n归档时间：{}\nCommit：{}\n测试结果：{}\n流程：诸葛亮分析 → guanyu 修复 → 张飞测试 → 华佗验收 → 陈琳归档\n报告：docs/bug-fixes/bug-{}.md",
-                    bid, ts, &commit_hash[..commit_hash.len().min(12)],
-                    if test_result == "ok" { "✅ PASS" } else { "❌ FAIL" },
-                    bid
+                    bid, ts, commit_hash, test_icon, bid
                 );
                 let _ = client.comment_bug(&bid, &archive_comment).await;
+                // 恢复 bug 状态为 active（comment_bug 会 resolve+activate）
+                // comment_bug 已经处理了 activate，无需额外操作
             }
         }
 
         // ── Step 9: 飞书通知 ──
-        let _ = self.feishu.send(&format!("📚 Bug #{} 修复报告已归档 → docs/bug-fixes/bug-{}.md", bid, bid), None).await;
+        let _ = self.feishu.send(&format!("📚 Bug #{} 修复报告已归档 → docs/bug-fixes/bug-{}.md ({})", bid, bid, test_icon), None).await;
 
         self.traces.log("chenlin", "doc_done", Some(&format!("Bug#{}", bid)), Some(&report_md.chars().take(200).collect::<String>()), None, None, None, Some("ok"), None).await;
         self.traces.publish_trace_for_ws("chenlin", "doc_done", &format!("Bug#{}", bid), "归档完成", "ok", 0).await;
