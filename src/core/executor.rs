@@ -334,6 +334,24 @@ impl AgentExecutor {
     async fn handle_fix_task(&self, msg: &str) {
         let bug_id = pipeline::parse_bugs_from_message(msg).first().map(|(b,_)| b.clone()).unwrap_or_default();
         if bug_id.is_empty() { return; }
+        // ── 铁律: 检查禅道 Bug 状态 — 已关闭/已解决的 Bug 禁止处理 ──
+        {
+            let cfg = crate::config::Config::load().ok();
+            if let Some(cfg) = cfg {
+                let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                if let Ok(bug_detail) = client.get_bug(&bug_id).await {
+                    if bug_detail.status == "resolved" || bug_detail.status == "closed" || bug_detail.status == "done" {
+                        tracing::warn!("[{}] Bug#{} 禅道状态={}, 已关闭/已解决，跳过处理", self.agent_id, bug_id, bug_detail.status);
+                        let _ = self.feishu.send(&format!("⏭️ Bug#{} 状态={}，已关闭，跳过处理", bug_id, bug_detail.status), None).await;
+                        return;
+                    }
+                    if pipeline::is_human(&bug_detail.opened_by) {
+                        tracing::info!("[{}] Bug#{} 由人类 {} 提出，将只加备注不改状态", self.agent_id, bug_id, bug_detail.opened_by);
+                    }
+                }
+            }
+        }
+
         // ── 铁律 19: fix_start 去重 — 检查是否已在处理 ──
         let dedup_key = format!("fix_active:{}:{}", self.agent_id, bug_id);
         let already_active: bool = self.redis.clone().exists(&dedup_key).await.unwrap_or(false);
@@ -1138,32 +1156,32 @@ impl AgentExecutor {
         
         tracing::info!("[xunyu] DB review for Bug #{}", bid);
         
-        // 检查 git diff 是否包含实际的 DB/SQL 变更
-        let has_migration = {
-            let worktree = "/tmp/agentforge-worktrees/xunyu";
-            let git_diff = std::process::Command::new("git")
+        // 检查所有修复者工作树的 git diff，找实际的 DB/SQL DDL 变更
+        let mut has_ddl_change = false;
+        let mut changed_files = String::new();
+        for agent_name in &["guanyu", "zhaoyun", "zhugeliang"] {
+            let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+            if let Ok(out) = std::process::Command::new("git")
                 .args(["diff", "--name-only", "HEAD~1"])
-                .current_dir(worktree)
-                .output();
-            match git_diff {
-                Ok(out) => {
-                    let files = String::from_utf8_lossy(&out.stdout);
-                    let sql_related = files.lines().any(|f| {
-                        f.ends_with(".sql") || f.contains("migration") || f.contains("mapper")
-                            || f.contains("schema") || f.contains("ddl")
-                    });
-                    sql_related
-                }
-                Err(_) => false,
+                .current_dir(&worktree)
+                .output() {
+                let files = String::from_utf8_lossy(&out.stdout);
+                changed_files = files.to_string();
+                // 只有真正的 SQL DDL 文件才算DB变更（.sql文件、migration目录）
+                // mapper/*.xml 只是映射文件引用，不算DDL变更
+                has_ddl_change = files.lines().any(|f| {
+                    f.ends_with(".sql") || f.contains("migration/") || f.contains("schema") || f.contains("ddl")
+                });
+                if has_ddl_change { break; }
             }
-        };
+        }
         
-        // DB 审查通过条件：无 DB 变更直接通过，有 DB 变更则检查脚本
-        let review_passed = if has_migration {
-            let worktree = "/tmp/agentforge-worktrees/xunyu";
-            let sql_dir = format!("{}/openhis-server-new/sql", worktree);
-            std::path::Path::new(&sql_dir).exists()
-        } else { true }; // 无 DB 变更，审查通过
+        // DB 审查通过条件：无DDL变更直接通过，有DDL变更才检查迁移脚本
+        let review_passed = if has_ddl_change {
+            // 检查是否有对应的SQL迁移脚本
+            let has_migration_script = changed_files.lines().any(|f| f.ends_with(".sql"));
+            has_migration_script
+        } else { true }; // 无DDL变更，审查通过
         
         if review_passed {
             tracing::info!("[xunyu] Bug #{} DB review PASSED", bid);
@@ -1208,18 +1226,20 @@ impl AgentExecutor {
                     )).await;
                 }
             }
-            // 退回修复 Agent
-            let sender = msg.split("修复 Agent:").nth(1).and_then(|s| s.split(',').next()).map(|s| s.trim()).unwrap_or("zhaoyun");
+            // 退回原修复 Agent（从消息中解析 sender_id）
+            let sender = msg.split("sender_id:").nth(1).and_then(|s| s.split(',').next()).map(|s| s.trim().trim_matches('"')).unwrap_or("zhaoyun");
             let rework_msg = format!("Bug #{} DB 审查未通过：需要创建 DB 迁移脚本。请补充。", bid);
             let pipe_task = serde_json::json!({
-                "agent_id": "zhangfei",
+                "agent_id": sender,
                 "message": rework_msg,
-                "source": "pipeline_retry",
+                "source": "pipeline_db_review_retry",
                 "sender_id": "xunyu",
+                "bug_reporter": reporter,
                 "msg_id": format!("pipeline-dbreview-{}-{}", bid, chrono::Local::now().timestamp()),
                 "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 "chat_id": "", "is_dm": "true",
             });
+            tracing::info!("[xunyu] Bug #{} DB review failed, routing back to {}", bid, sender);
             let _: redis::RedisResult<i64> = self.redis.clone().rpush(
                 format!("agent-work-queue:fix:{}", sender),
                 pipe_task.to_string()

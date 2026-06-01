@@ -224,6 +224,25 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - **已有 commit 也必须验证** — develop 有 commit ≠ bug 已修好，必须 git show 检查 + 重新测试 + 检查禅道备注
 - **修复备注必须包含完整证据** — 根因(文件/函数/行) + 修复方案 + 验证结果(日志) + 影响范围 + 6环验证表
 
+### 🔴 Bug 状态铁律（零容忍）
+- **已关闭/已解决的 Bug 禁止处理** — 处理前必须检查禅道状态，status=resolved/closed 的 Bug 直接跳过，不修改不测试
+- **人类提的 Bug 只加备注不改状态** — reporter 是人类账号(chenxj/yangkexiang 等)时，不改 status、不改 assignedTo，只添加备注
+- **智能体提的 Bug 可改分配和加备注** — 但状态变更必须等测试通过后由华佗确认
+- **每个修复必须有 git commit** — commit message 格式: `fix(#bug_id): 简要描述`，推送到 develop 分支
+- **commit 前必须验证** — mvn compile/vue-tsc 0 error + 无新增 lint 警告
+
+### 🔴 归档铁律（三重写入）
+- **陈琳归档必须三重写入** — Git(docs/bug-fixes/bug-<id>.md) + SQLite(bug_reports 表) + Redis(fix_doc:<id>)
+- **SQLite 归档必须使用完整字段** — bug_id, title, reporter, commit_hash, fix_files, test_result, test_output, pipeline_json, report_md, duration_ms
+- **禅道备注格式固定** — `[📝 陈琳归档] Bug #xxx 修复报告已归档`，使用 resolve+activate workaround
+- **归档报告必须包含** — 基本信息 + 根因分析 + 修复文件 + 流程时间线表
+
+### 🔴 测试重试铁律
+- **测试失败自动重试** — 张飞测试失败后退回原修复智能体，重试计数+1
+- **最多重试 3 次** — 超过 3 次通知人工介入，不再自动重试
+- **DB审查失败自动回退** — 荀彧审查失败后路由回原修复智能体，附带失败原因
+- **重试时必须读取上次失败原因** — 不能盲目重试，必须针对失败点修复
+
 ### 🔴 数据库铁律（涉及 SQL/数据表/Mapper 的 Bug 必须遵守）
 - **修前必须查询真实数据库** — 用 `db-query hisdev "..."` 连接数据库，确认表结构、字段约束、索引
 - **禁止凭猜测写 SQL** — 必须先 `db-query hisdev "\d table_name"` 查看表结构，确认字段名和类型
