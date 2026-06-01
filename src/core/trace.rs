@@ -77,7 +77,13 @@ impl TraceStore {
                 git_diff TEXT NOT NULL DEFAULT '',
                 report_md TEXT NOT NULL DEFAULT '',
                 zentao_commented INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')), reporter TEXT NOT NULL DEFAULT '', test_result TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                reporter TEXT NOT NULL DEFAULT '',
+                test_result TEXT NOT NULL DEFAULT '',
+                test_output TEXT NOT NULL DEFAULT '',
+                pipeline_json TEXT NOT NULL DEFAULT '',
+                fix_files TEXT NOT NULL DEFAULT '[]',
+                duration_ms INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             "#,
