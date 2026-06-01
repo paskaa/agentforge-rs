@@ -94,7 +94,7 @@ fn agent_constraints(agent_name: &str) -> &str {
         }
         "zhangfei" => {
             "## 测试约束
-             - 运行 Playwright 回归测试：npx playwright test --grep @bug{id} --workers=1
+             - 运行 Playwright 回归测试：npx playwright test --grep @bug{{id}} --workers=1
              - 如果测试不存在：标记为「无需测试」继续流转
              - 测试失败：自动退回修复 Agent 重修（最多 3 次）
              - 测试通过：通知 Huatuo 验收 + Chenlin 归档"
@@ -165,6 +165,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     let review_audit   = load_skill(&format!("{}/review-audit/SKILL.md", skills_base));
     let karpathy       = load_skill(&format!("{}/karpathy-guidelines/SKILL.md", skills_base));
     let full_chain     = load_skill(&format!("{}/full-chain-fix/SKILL.md", skills_base));
+    let bdt            = load_skill(&format!("{}/bug-driven-testing/SKILL.md", skills_base));
 
     let agents_md_path = "/root/.openclaw/workspace/his-repo/AGENTS.md";
     let agents_md_hint = load_skill(agents_md_path)
@@ -249,6 +250,9 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 ### 🔗 全链路修复
 {full_chain}
 
+### 🧪 Bug-Driven Testing（先写测试再修 Bug）
+{bdt}
+
 ## 项目规则摘要
 {agents_md_hint}
 
@@ -259,34 +263,44 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 ## 禅道 Bug 详情
 {bug_details}
 
-## Harness 修复指引
+## Harness 修复指引（Bug-Driven Testing 流程）
 1. **Init**: 确认目录，读 AGENTS.md
-2. **Analyze**: 用 rg/grep 搜索相关代码
-3. **Pre-check**: 检查 develop 上是否有该 bug 的历史修复提交
+2. **Bug Analysis**: 读取禅道 Bug 全部信息（标题/步骤/截图/备注）
+3. **Test Design**: 根据 Bug 信息生成 Playwright 测试用例
+   - 从标题推断模块和路由
+   - 从复现步骤生成操作序列
+   - 从期望结果生成断言
+   - 生成文件：tests/e2e/specs/bug-{{id}}.spec.ts
+4. **Baseline Test**: 运行基线测试（预期失败，证明 Bug 存在）
+   - `npx playwright test --grep @bug{{id}}` → 预期 FAIL
+   - 如果通过 → 检查 develop 是否已修复，检查测试用例是否正确
+5. **Pre-check**: 检查 develop 上是否有该 bug 的历史修复提交
    - 如果有：读之前的 commit diff，分析是否完整修复
    - 如果之前修得不完整：指出遗漏点，重新全链路分析
    - 如果之前修复完整：输出「之前修复已完成，无需改动」并退出
-4. **Full-chain (6 环)**: 无论是否已有修复，都跑一遍
+6. **Full-chain (6 环)**: 无论是否已有修复，都跑一遍
    - 前端/页面 → Controller → Service → Mapper → DB/SQL → 关联模块
    - 涉及数据库字段时必走，查每个环节的字段映射
    - ⚠️ 每环必须标记状态：【✅ 正常 / 🔧 已修改 / ❌ 遗漏】
    - ⚠️ 如果只改了后端没改前端（或反之），说明分析不完整，重新检查
-5. **Reproduce**: 按步骤复现，定位根因
-6. **Fix**: 修改文件（用 apply_patch），一次修彻底
+7. **Fix**: 修改文件（用 apply_patch），一次修彻底
    - ⚠️ 涉及新增 Entity 字段时，必须同时创建 DB 迁移脚本（sql/迁移记录-DB变更记录/YYYYMMDD_fix_BUG#XXXX_description.sql）
    - ⚠️ 只改 Entity 不改 DB = 修复不完整，运行时 100% 报错
    - ⚠️ 涉及交互流程（退回/审核/签发等）的 BUG，必须识别「发起方📤」（谁操作）和「接收方📥」（谁查看）
      - 📤 发起方：检查操作入口→校验→API→Service→DB 是否完整
      - 📥 接收方：检查 DB→Service→API→展示字段→页面列 是否完整
      - 只修一端不修另一端 = 修复不完整
-7. **Verify**: 运行编译/语法检查 + 端到端数据流确认
+8. **Regression Test**: 运行回归测试（预期通过，证明修复有效）
+   - `npx playwright test --grep @bug{{id}}` → 预期 PASS
+   - 如果失败 → 分析失败原因 → 返回 Step 7 重新修复
+9. **Verify**: 运行编译/语法检查 + 端到端数据流确认
    - 编译检查：mvn compile / npm lint / cargo check / vue-tsc + vite build
    - ⚠️ 数据流检查：从起点到终点每环确认数据能传过去
      - 📤 录入链路：前端发送字段 → API 参数接收 → Service 读取 → DB 写入
      - 📥 展示链路：DB 查询 → Service 返回 → API 响应 → 前端展示列
    - ⚠️ 交互检查：涉及前端改动时确认弹窗/提示/跳转是否正常工作
    - ⚠️ 两端核对：涉及交互流程的 BUG，用表格对比两端修复状态
-8. **Submit**: 输出变更摘要，格式：
+10. **Submit**: 输出变更摘要，格式：
    ```
    根因：
    - ...
