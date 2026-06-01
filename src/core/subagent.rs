@@ -1216,7 +1216,8 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                         .args(["-C", main_repo, "log", "--oneline", "origin/develop", "--grep",
                                &format!("Fix Bug #{}", bug_id)])
                         .output();
-                    let skip_cherry = match (&already_fixed, &already_fixed_old) {
+                    // 检查 develop 上是否已有此 bug 的修复
+                    let already_fixed = match (&already_fixed, &already_fixed_old) {
                         (Ok(a), Ok(b)) => {
                             let out_a = String::from_utf8_lossy(&a.stdout).trim().to_string();
                             let out_b = String::from_utf8_lossy(&b.stdout).trim().to_string();
@@ -1224,10 +1225,14 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                         }
                         _ => false,
                     };
+                    // 即使 develop 已有修复，也尝试 cherry-pick（可能有增量修复）
+                    // 只有当 diff 为空时才跳过
+                    let skip_cherry = false; // 总是尝试 cherry-pick
+                    if already_fixed {
+                        tracing::info!("[{}] Bug #{} develop 已有修复，尝试增量 cherry-pick", agent_name, bug_id);
+                    }
 
-                    if skip_cherry {
-                        tracing::info!("[{}] Bug #{} already fixed on develop — skipping cherry-pick", agent_name, bug_id);
-                    } else {
+                    {
                         // Try cherry-pick with -X theirs to auto-resolve simple conflicts
                         let author = format!("{} <{}@gentronhealth.com>", agent_name, agent_name);
                         let cherry = Command::new("git")

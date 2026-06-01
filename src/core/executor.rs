@@ -190,12 +190,12 @@ impl AgentExecutor {
         let mut requeued = 0u32;
 
         for bid in &failed_bugs {
-            // 检查重试次数（每个 bug 最多重试 2 次）
+            // 检查重试次数（每个 bug 最多重试 10 次）
             let retry_count: i32 = self.redis.clone()
                 .get(format!("{}:{}", retry_key_prefix, bid))
                 .await.unwrap_or(0);
-            if retry_count >= 2 {
-                tracing::info!("[{}] Bug #{} max retries ({}) reached, skipping", self.agent_id, bid, retry_count);
+            if retry_count >= 10 {
+                tracing::warn!("[{}] Bug #{} max retries ({}) reached, skipping", self.agent_id, bid, retry_count);
                 continue;
             }
 
@@ -524,7 +524,7 @@ impl AgentExecutor {
                         });
                         let queue = format!("agent-work-queue:fix:{}", an_v);
                         let _: redis::RedisResult<i64> = redis_v.clone().rpush(&queue, retry_task.to_string()).await;
-                        tracing::info!("[{}] Bug #{} 验证失败反馈已推送到队列 (重试 {}/2)", an_v, bid_v, retry_count + 1);
+                        tracing::info!("[{}] Bug #{} 验证失败反馈已推送到队列 (重试 {}/10)", an_v, bid_v, retry_count + 1);
                     } else {
                         tracing::warn!("[{}] Bug #{} 验证重试已达上限(10次)，标记为最终失败", an_v, bid_v);
                         // 存储最终失败标记

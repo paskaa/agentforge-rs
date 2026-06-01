@@ -56,7 +56,9 @@ impl TraceStore {
                 tool TEXT,
                 model TEXT,
                 duration_ms INTEGER,
-                status TEXT
+                status TEXT,
+                detail TEXT,
+                created TEXT DEFAULT (datetime('now'))
             )
             "#,
         )
@@ -68,6 +70,10 @@ impl TraceStore {
         )
         .execute(&pool)
         .await?;
+
+        // Migration: add detail column if missing
+        let _ = sqlx::query("ALTER TABLE traces ADD COLUMN detail TEXT").execute(&pool).await;
+        let _ = sqlx::query("ALTER TABLE traces ADD COLUMN created TEXT DEFAULT (datetime('now'))").execute(&pool).await;
 
         Ok(Self { pool })
     }
