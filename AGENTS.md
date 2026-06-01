@@ -319,7 +319,17 @@ cargo run -- pipeline --max-bugs 5
     - 不删除 interface 中已定义的方法
     - 不修改已有方法的参数列表
     - 新增方法时同步更新 interface
-    - 编译验证是最后一道防线，但不能依赖它来发现签名问题 — 如果 executor 进程崩溃，Redis 中的 `codex_lock:{agent}` 必须在 TTL 过期后自动释放。新进程启动时必须检查并清理残留锁。
+    - 编译验证是最后一道防线，但不能依赖它来发现签名问题
+26. **BDT 流程（Bug-Driven Testing）** — 每个 bug 必须走完整测试流程：
+    - Step 1: 获取禅道 bug 信息（标题、步骤、期望结果、实际结果、截图）
+    - Step 2: 编写 Playwright 测试用例（覆盖复现步骤）
+    - Step 3: 基线测试（预期失败，证明 bug 存在）
+    - Step 4: 修复代码
+    - Step 5: 回归测试（预期通过，证明修复有效）
+    - Step 6: 全链路验证（编译 + 单元测试 + Playwright + API + DB）
+    - **禁止跳过任何步骤。无测试的修复 = 假修复。**
+27. **cherry-pick 后必须在 develop 上验证** — 修复推送到 agent 分支后，cherry-pick 到 develop，然后在 develop 分支上跑验证。不在 agent worktree 上验证。
+28. **登录凭证和路由必须从禅道获取** — Playwright 测试的登录账号、密码、tenantId、页面路由必须从禅道 bug 描述中提取，不能硬编码猜测。
 
 ---
 

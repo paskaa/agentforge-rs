@@ -189,7 +189,9 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 
     // Queue status
     let queues = ["agent-work-queue:fix:guanyu", "agent-work-queue:fix:zhaoyun",
-                   "agent-work-queue:fix:xunyu", "agent-work-queue:fix:zhangfei"];
+                   "agent-work-queue:fix:xunyu", "agent-work-queue:fix:zhangfei",
+                   "agent-work-queue:fix:huatuo", "agent-work-queue:fix:chenlin",
+                   "agent-work-queue:fix:liubei", "agent-work-queue:fix:zhugeliang"];
     let mut total_queue = 0i64;
     for q in &queues {
         let len = redis_queue_len(q);
@@ -212,14 +214,14 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         let is_locked = locked(id);
         let bug = if is_locked { current_bug_for(id) } else { String::new() };
         let (rate_str, avg_str) = if let Some(ref pool) = s.pool {
-            let fc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE agent_id = ?1 AND event = 'fix_done'")
+            let fc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE agent_id = ?1 AND event IN ('fix_done','test_done','verify_done','doc_done','analyze_done','pm_routed')")
                 .bind(id).fetch_one(pool).await.unwrap_or(0);
-            let sc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE agent_id = ?1 AND event = 'fix_done' AND status = 'ok'")
+            let sc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE agent_id = ?1 AND event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND status = 'ok'")
                 .bind(id).fetch_one(pool).await.unwrap_or(0);
-            let avg: f64 = sqlx::query_scalar("SELECT COALESCE(AVG(duration_ms),0) FROM traces WHERE agent_id = ?1 AND event = 'fix_done'")
+            let avg: f64 = sqlx::query_scalar("SELECT COALESCE(AVG(duration_ms),0) FROM traces WHERE agent_id = ?1 AND event IN ('fix_done','test_done','verify_done','doc_done','analyze_done')")
                 .bind(id).fetch_one(pool).await.unwrap_or(0.0);
             let rate = if fc > 0 { sc as f64 / fc as f64 * 100.0 } else { 0.0 };
-            (format!("{:.0}%", rate), format!("{:.0}s", avg / 1000.0))
+            (format!("{:.1}%", rate), format!("{:.0}s", avg / 1000.0))
         } else { ("N/A".into(), "N/A".into()) };
 
         r.agents.push(AgentSt {
@@ -231,22 +233,22 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
 
     // Stats
     if let Some(ref pool) = s.pool {
-        // 今日活跃 Bug 数（fix_start）
+        // 今日活跃 Bug 数（所有启动事件）
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let today_pattern = format!("{}%", today);
-        if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traces WHERE event = 'fix_start' AND ts LIKE ?1")
+        if let Ok(v) = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traces WHERE event IN ('fix_start','test_start','verify_start','task_start','pm_routed') AND ts LIKE ?1")
             .bind(&today_pattern).fetch_one(pool).await { r.stats.total = v; }
-        // 今日成功修复数
-        let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event = 'fix_done' AND status = 'ok' AND ts LIKE ?1")
+        // 今日成功完成数
+        let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND status = 'ok' AND ts LIKE ?1")
             .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
         // 今日总完成数
-        let tot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event = 'fix_done' AND ts LIKE ?1")
+        let tot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND ts LIKE ?1")
             .bind(&today_pattern).fetch_one(pool).await.unwrap_or(0);
         r.stats.fixed_today = ok;
-        r.stats.rate = if tot > 0 { format!("{:.0}%", ok as f64 / tot as f64 * 100.0) } else { "N/A".into() };
+        r.stats.rate = if tot > 0 { format!("{:.1}%", ok as f64 / tot as f64 * 100.0) } else { "N/A".into() };
 
         if let Ok(rows) = sqlx::query_as::<_, (String,String,String,i64,String)>(
-            "SELECT COALESCE(task_id,'?'), agent_id, COALESCE(status,'?'), COALESCE(duration_ms,0), COALESCE(ts,'') FROM traces WHERE event = 'fix_done' ORDER BY ts DESC LIMIT 20"
+            "SELECT COALESCE(task_id,'?'), agent_id, COALESCE(status,'?'), COALESCE(duration_ms,0), COALESCE(ts,'') FROM traces WHERE event IN ('fix_done','test_done','verify_done','doc_done','analyze_done','fix_start','test_start','verify_start','pm_routed') ORDER BY ts DESC LIMIT 50"
         ).fetch_all(pool).await {
             for (bid,aid,st,dur,ts) in rows {
                 r.recent.push(FixRow { bug: bid.replace("Bug#",""), agent: aid, ok: st=="ok", dur: format!("{:.0}s",dur as f64/1000.0), ts });

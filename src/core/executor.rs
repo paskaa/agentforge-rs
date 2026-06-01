@@ -606,7 +606,7 @@ impl AgentExecutor {
                         "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                         "chat_id": "", "is_dm": "true",
                     });
-                    let _: redis::RedisResult<i64> = redis_clone.rpush("agent-work-queue:fix:zhangfei", pipe_task.to_string()).await;
+                    let _: redis::RedisResult<i64> = redis_clone.rpush("agent-work-queue:fix:zhugeliang", pipe_task.to_string()).await;
                 }
             }
         });
@@ -891,7 +891,7 @@ impl AgentExecutor {
                 match client.get_bug(&bid).await {
                     Ok(detail) => {
                         let combined = format!("{:?} {:?} {:?}", detail.title, detail.steps, detail.module_title).to_lowercase();
-                        let db_kw = ["sql", "字段", "列", "表", "数据库", "column", "table", "ddl", "dml", "迁移", "mapper", "xml"];
+                        let db_kw = ["sql", "数据库", "column", "table", "ddl", "dml", "迁移", "mapper xml", "mybatis", "alter table", "create table", "drop table", "insert into", "update .* set", "select .* from"];
                         db_kw.iter().any(|kw| combined.contains(kw))
                     }
                     Err(_) => false,
@@ -938,15 +938,32 @@ impl AgentExecutor {
         
         tracing::info!("[xunyu] DB review for Bug #{}", bid);
         
-        // 检查是否包含迁移脚本
+        // 检查 git diff 是否包含实际的 DB/SQL 变更
         let has_migration = {
-            let worktree = format!("/tmp/agentforge-worktrees/xunyu");
-            let path = format!("{}/openhis-server-new/sql", worktree);
-            std::path::Path::new(&path).exists()
+            let worktree = "/tmp/agentforge-worktrees/xunyu";
+            let git_diff = std::process::Command::new("git")
+                .args(["diff", "--name-only", "HEAD~1"])
+                .current_dir(worktree)
+                .output();
+            match git_diff {
+                Ok(out) => {
+                    let files = String::from_utf8_lossy(&out.stdout);
+                    let sql_related = files.lines().any(|f| {
+                        f.ends_with(".sql") || f.contains("migration") || f.contains("mapper")
+                            || f.contains("schema") || f.contains("ddl")
+                    });
+                    sql_related
+                }
+                Err(_) => false,
+            }
         };
         
-        // DB 审查通过条件：有迁移脚本且 SQL 语法正确
-        let review_passed = has_migration; // 简化版：有迁移脚本即通过
+        // DB 审查通过条件：无 DB 变更直接通过，有 DB 变更则检查脚本
+        let review_passed = if has_migration {
+            let worktree = "/tmp/agentforge-worktrees/xunyu";
+            let sql_dir = format!("{}/openhis-server-new/sql", worktree);
+            std::path::Path::new(&sql_dir).exists()
+        } else { true }; // 无 DB 变更，审查通过
         
         if review_passed {
             tracing::info!("[xunyu] Bug #{} DB review PASSED", bid);
