@@ -144,7 +144,7 @@ impl AgentExecutor {
                 "pipeline_analyze" if self.agent_id == "zhugeliang" => self.handle_pipeline_analyze(msg).await,
                 "pipeline_db_review" if self.agent_id == "xunyu" => self.handle_pipeline_db_review(msg).await,
                 "pipeline_report" if self.agent_id == "liubei" => self.handle_pipeline_report(msg).await,
-                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" => self.handle_fix_task(msg).await,
+                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" | "verify_retry" => self.handle_fix_task(msg).await,
                 "pipeline_fix_done" if self.agent_id == "zhangfei" => self.handle_pipeline_test(msg).await,
                 "pipeline_test_done" if self.agent_id == "huatuo" => self.handle_pipeline_verify(msg).await,
                 "pipeline_test_done" if self.agent_id == "chenlin" => self.handle_chenlin_doc(msg).await,
@@ -478,12 +478,12 @@ impl AgentExecutor {
                     tracing::warn!("[{}] Bug #{} 全链路验证失败: {}", an_v, bid_v, verification.summary);
                     let _: redis::RedisResult<()> = redis_v.sadd(format!("agent-failed-bugs:{}", an_v), &bid_v).await;
                     
-                    // 检查验证重试次数（最多 2 次）
+                    // 检查验证重试次数（最多 10 次）
                     let retry_key = format!("verify_retry:{}:{}", an_v, bid_v);
                     let retry_count: i32 = redis_v.clone().get(&retry_key).await.unwrap_or(0);
                     let _: redis::RedisResult<()> = redis_v.clone().set_ex(&retry_key, retry_count + 1, 3600).await;
                     
-                    if retry_count < 2 {
+                    if retry_count < 10 {
                         // 构建失败反馈消息，包含详细失败原因
                         let failed_checks: Vec<String> = verification.checks.iter()
                             .filter(|c| !c.passed)
@@ -526,7 +526,7 @@ impl AgentExecutor {
                         let _: redis::RedisResult<i64> = redis_v.clone().rpush(&queue, retry_task.to_string()).await;
                         tracing::info!("[{}] Bug #{} 验证失败反馈已推送到队列 (重试 {}/2)", an_v, bid_v, retry_count + 1);
                     } else {
-                        tracing::warn!("[{}] Bug #{} 验证重试已达上限(2次)，标记为最终失败", an_v, bid_v);
+                        tracing::warn!("[{}] Bug #{} 验证重试已达上限(10次)，标记为最终失败", an_v, bid_v);
                         // 存储最终失败标记
                         let final_key = format!("verify_final_fail:{}:{}", an_v, bid_v);
                         let _: redis::RedisResult<()> = redis_v.clone().set_ex(&final_key, &verify_detail, 86400).await;

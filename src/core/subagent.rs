@@ -781,7 +781,42 @@ fn run_codex_fix_impl(
     };
 
     // Step 2: Build harness-augmented prompt
-    let prompt = build_harness_prompt(agent_name, bug_id, bug_title, &bug_details_text);
+    let prompt_str = build_harness_prompt(agent_name, bug_id, bug_title, &bug_details_text);
+
+    // ── 验证失败重试：追加失败详情到 prompt ──
+    let prompt = if bug_title.contains("验证失败反馈") {
+        let detail_key = format!("verify_fail_detail:{}:{}", agent_name, bug_id);
+        let detail = std::process::Command::new("redis-cli")
+            .args(["-p", "16379", "get", &detail_key])
+            .output()
+            .map(|o| {
+                let val = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if val.is_empty() || val == "(nil)" { String::new() } else { val }
+            })
+            .unwrap_or_default();
+        let retry_count: u32 = std::process::Command::new("redis-cli")
+            .args(["-p", "16379", "get", &format!("verify_retry:{}:{}", agent_name, bug_id)])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(1))
+            .unwrap_or(1);
+        if !detail.is_empty() {
+            tracing::info!("[{}] Bug#{} 收到验证失败反馈（第 {} 次重试）", agent_name, bug_id, retry_count);
+            format!("{}
+
+## ⚠️ 验证失败反馈（第 {} 次重试）
+
+上次修复未通过全链路验证：
+
+{}
+
+请针对上述失败项重新修复。", 
+                prompt_str, retry_count, detail)
+        } else {
+            prompt_str
+        }
+    } else {
+        prompt_str
+    };
 
     // Step 3: Target repository (agent-specific)
     let work_dir = agent_work_dir(agent_name);
