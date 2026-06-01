@@ -377,9 +377,13 @@ async fn constraints_api() -> impl IntoResponse {
     }
 }
 
-async fn zentao_stats_api(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    // Check cache (60s TTL)
-    {
+async fn zentao_stats_api(
+    State(s): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let force_refresh = params.get("refresh").map(|v| v == "true").unwrap_or(false);
+    // Check cache (60s TTL) — skip if refresh=true
+    if !force_refresh {
         let cache = s.zentao_cache.read().await;
         if let Some((ref json, ts)) = *cache {
             if ts.elapsed() < std::time::Duration::from_secs(60) {

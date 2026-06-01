@@ -104,7 +104,7 @@ async function fetchData() {
   loading.value = true
   try {
     const [zenRes, dashRes] = await Promise.all([
-      fetch('/api/zentao/stats'),
+      fetch('/api/zentao/stats?refresh=true'),
       fetch('/api/dashboard')
     ])
     zentao.value = await zenRes.json()
