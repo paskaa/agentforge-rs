@@ -147,7 +147,7 @@ impl AgentExecutor {
                 "pipeline_analyze" if self.agent_id == "zhugeliang" => self.handle_pipeline_analyze(msg).await,
                 "pipeline_db_review" if self.agent_id == "xunyu" => self.handle_pipeline_db_review(msg).await,
                 "pipeline_report" if self.agent_id == "liubei" => self.handle_pipeline_report(msg).await,
-                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" | "verify_retry" => self.handle_fix_task(msg).await,
+                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" | "verify_retry" | "web_ui" => self.handle_fix_task(msg).await,
                 "pipeline_fix_done" if self.agent_id == "zhangfei" => self.handle_pipeline_test(msg).await,
                 "pipeline_test_done" if self.agent_id == "huatuo" => self.handle_pipeline_verify(msg).await,
                 "pipeline_test_done" if self.agent_id == "chenlin" => self.handle_chenlin_doc(msg).await,

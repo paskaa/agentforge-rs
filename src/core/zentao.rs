@@ -231,41 +231,31 @@ impl ZentaoClient {
 
     /// 给 Bug 添加备注（不改状态）
     pub async fn comment_bug(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
-        let url = format!(
-            "{}/api.php/v1/bugs/{}/comment",
-            self.base_url, bug_id
-        );
-        let body = serde_json::json!({
-            "comment": comment
-        });
-        let resp = self.client.post(&url)
-            .header("Token", &self.token)
-            .json(&body)
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            // Fallback: some Zentao versions use PUT for comments
-            let url2 = format!("{}/api.php/v1/bugs/{}", self.base_url, bug_id);
-            let body2 = serde_json::json!({ "comment": comment });
-            let resp2 = self.client.put(&url2)
-                .header("Token", &self.token)
-                .json(&body2)
-                .send()
-                .await?;
-            let status2 = resp2.status();
-            if !status2.is_success() {
-                let text2 = resp2.text().await.unwrap_or_default();
-                tracing::warn!("[zentao] Bug #{} 备注失败: HTTP {} — {}", bug_id, status, text);
-                anyhow::bail!("Zentao comment API error: HTTP {} — {} / PUT: HTTP {} — {}", status, text, status2, text2);
+        // CLI-based comment (HTTP API comment endpoint not available in this Zentao version)
+        let cli = "/usr/local/bin/zentao";
+        let result = std::process::Command::new(cli)
+            .args(["bug", "update", "--id", bug_id, "--comment", comment])
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if stdout.contains("success") || stdout.contains("保存成功") {
+                    tracing::info!("[zentao] Bug #{} 备注已添加 (CLI)", bug_id);
+                    return Ok(());
+                }
+                tracing::warn!("[zentao] Bug #{} CLI 备注异常: {}", bug_id, stdout);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!("[zentao] Bug #{} CLI 备注失败: {}", bug_id, stderr);
+            }
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} CLI 备注错误: {}", bug_id, e);
             }
         }
-        tracing::info!("[zentao] Bug #{} 备注已添加", bug_id);
-        Ok(())
+        anyhow::bail!("Zentao comment failed for Bug #{}", bug_id)
     }
 
-    /// 分配 Bug 给指定账号
     pub async fn assign_bug(&self, bug_id: &str, assign_to: &str, comment: &str) -> anyhow::Result<()> {
         let url = format!(
             "{}/api.php/v1/bugs/{}/assign",
