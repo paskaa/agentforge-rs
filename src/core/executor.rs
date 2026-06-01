@@ -29,8 +29,9 @@ const AGENT_NAMES: &[(&str, &str)] = &[
     ("zhugeliang","诸葛亮"),("liubei","刘备"),("guanyu","关羽"),("zhaoyun","赵云"),
     ("xunyu","荀彧"),("zhangfei","张飞"),("huatuo","华佗"),("chenlin","陈琳"),
 ];
-const FIXERS: &[&str] = &["zhugeliang","liubei","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
+const FIXERS: &[&str] = &["zhugeliang","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
 const ALL_AGENTS: &[&str] = &["zhugeliang","liubei","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
+const COORDINATOR: &str = "liubei";
 
 const MAX_FIX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 5000; // 5s base, doubles each retry
@@ -72,7 +73,9 @@ impl AgentExecutor {
         let redis = client.get_multiplexed_async_connection().await?;
         let redis_sync = Arc::new(Mutex::new(client.get_connection()?));
         let is_fixer = FIXERS.contains(&agent_id);
-        let fix_stream = if is_fixer { format!("agent-work-queue:fix:{}", agent_id) } else { "agent-work-queue".into() };
+        let fix_stream = if agent_id == "liubei" { "agent-work-queue:coordinator".into() }
+        else if is_fixer { format!("agent-work-queue:fix:{}", agent_id) }
+        else { "agent-work-queue".into() };
         let llm = LlmClient::new(&config.llm.api_base, &config.llm.api_key, agent_cfg.model.as_deref().unwrap_or(&config.llm.default_model));
         let feishu = FeishuClient::new(&config.feishu.app_id, &config.feishu.app_secret, &config.feishu.group_chat_id);
         let traces = Arc::new(TraceStore::open(std::path::Path::new("/var/lib/agentforge/traces.db")).await?);
@@ -97,7 +100,7 @@ impl AgentExecutor {
         // Non-fixer: read from stream without consumer group
         // (simpler than XREADGROUP — just xread with new messages)
         loop {
-            if (self.agent_id == "zhugeliang" || self.agent_id == "liubei")
+            if self.agent_id == "liubei"
                 && self.last_coordinator_scan.elapsed() > Duration::from_secs(300)
             { self.last_coordinator_scan = Instant::now(); self.run_coordinator_scan().await; }
 
@@ -291,6 +294,7 @@ impl AgentExecutor {
                 self.push_task_dedup(&queue, &task_json.to_string()).await;
             }
         }
+        // liubei is the sole coordinator — dispatch to subagents
         if self.agent_id == "liubei" { self.handle_pm_analyze("请分析和分派所有活跃 Bug").await; }
     }
 

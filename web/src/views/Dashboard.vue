@@ -46,16 +46,44 @@
       禅道同步: {{ zentao.last_sync }} · 活跃: {{ zentao.active || 0 }} · 总计: {{ zentao.total || 0 }}
     </div>
 
-    <!-- 智能体状态 -->
+    <!-- 协调者 + 子智能体 -->
     <el-card shadow="never" style="margin-bottom:20px">
       <template #header>
         <div style="display:flex;align-items:center;gap:8px">
-          <span>🤖 智能体状态</span>
-          <el-tag type="info" size="small">{{ agents.length }} 个</el-tag>
+          <span>🏗️ Subagent 架构</span>
+          <el-tag type="warning" size="small">1 主 + {{ agents.length - 1 }} 子</el-tag>
         </div>
       </template>
-      <el-row :gutter="12">
-        <el-col :span="3" v-for="a in agents" :key="a.id">
+
+      <!-- 协调者 -->
+      <div style="margin-bottom:16px">
+        <router-link :to="'/agent/liubei'" style="text-decoration:none;color:inherit">
+          <div class="coordinator-card" :class="coordinator.status">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="font-size:28px">{{ coordinator.icon }}</div>
+              <div>
+                <div style="font-size:16px;font-weight:700">{{ coordinator.name }} <span style="font-size:12px;color:#f59e0b;font-weight:400">👑 协调者</span></div>
+                <div style="font-size:12px;color:#94a3b8">{{ coordinator.role }} · 扫描活跃 Bug → 分派给子智能体</div>
+              </div>
+              <div style="margin-left:auto;text-align:right">
+                <el-tag :type="coordinator.status === 'working' ? 'success' : 'info'" size="small" effect="dark">
+                  {{ coordinator.status === 'working' ? '🔄 协调中' : '💤 空闲' }}
+                </el-tag>
+                <div style="font-size:11px;color:#64748b;margin-top:4px">成功率 {{ coordinator.rate }} · 平均 {{ coordinator.avg_s }}</div>
+              </div>
+            </div>
+          </div>
+        </router-link>
+      </div>
+
+      <!-- 分派箭头 -->
+      <div style="text-align:center;color:#475569;font-size:12px;margin-bottom:12px">
+        ▼ 刘备分派 → 子智能体执行 → 结果回报 ▼
+      </div>
+
+      <!-- 子智能体 -->
+      <el-row :gutter="10">
+        <el-col :span="3" v-for="a in subagents" :key="a.id">
           <router-link :to="'/agent/' + a.id" style="text-decoration:none;color:inherit">
             <div class="agent-mini" :class="a.status">
               <div style="font-size:20px">{{ a.icon }}</div>
@@ -106,6 +134,13 @@ const stats = ref({})
 const zentao = ref({})
 const agents = ref([])
 const recent = ref([])
+
+const coordinator = computed(() => {
+  return agents.value.find(a => a.id === 'liubei') || { id: 'liubei', name: '刘备', role: '协调者', icon: '👑', status: 'idle', rate: '0%', avg_s: '0s' }
+})
+const subagents = computed(() => {
+  return agents.value.filter(a => a.id !== 'liubei')
+})
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detailData = ref(null)
@@ -162,6 +197,12 @@ onUnmounted(() => clearInterval(pollTimer))
 </script>
 
 <style scoped>
+.coordinator-card {
+  background: #1e293b; border: 2px solid #f59e0b; border-radius: 10px;
+  padding: 16px 20px; cursor: pointer; transition: all 0.2s;
+}
+.coordinator-card:hover { border-color: #fbbf24; box-shadow: 0 0 12px rgba(245,158,11,0.2); }
+.coordinator-card.working { border-color: #22c55e; box-shadow: 0 0 12px rgba(34,197,94,0.15); }
 .stat-card { border-radius: 10px; cursor: pointer; transition: transform 0.15s; border: 1px solid #334155; background: #1e293b; }
 .stat-card:hover { transform: translateY(-2px); }
 .stat-card.warning { border-left: 3px solid #f59e0b; }
