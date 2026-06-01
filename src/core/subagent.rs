@@ -780,12 +780,48 @@ fn run_codex_fix_impl(
                 let commit_changes = count_last_commit_changes(agent_name);
                 if commit_changes > 0 { changes = commit_changes; }
             }
-            let success = has_fix_commit || (
-                exit_code == 0 && (
-                    stdout.contains("修复完成") || stdout.contains("fix") || stdout.contains("resolved")
-                    || changes > 0
+            // ── 问题1: 空输出检测 ──
+            // codex 超时/崩溃时 stdout 为空或极短，不应计为成功
+            let stdout_trimmed = stdout.trim();
+            let is_empty_output = stdout_trimmed.is_empty() || stdout_trimmed.len() < 20;
+            let is_analysis_only = stdout_trimmed.contains("分析") && !stdout_trimmed.contains("修复")
+                && !stdout_trimmed.contains("fix") && !stdout_trimmed.contains("修改");
+            let is_skip_output = stdout_trimmed.contains("之前修复已完成") || stdout_trimmed.contains("无需改动");
+            
+            // ── 问题2: 误判保护 — "已修复"必须有实际变更证据 ──
+            let has_real_evidence = if is_skip_output {
+                // 声称"已修复"时，必须有 git diff 证据证明代码确实有变更
+                let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+                let diff_output = Command::new("git")
+                    .args(["-C", &worktree, "diff", "HEAD~1", "--stat"])
+                    .output();
+                let has_diff = diff_output.map(|o| {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    !stdout.trim().is_empty() && stdout.contains('|')
+                }).unwrap_or(false);
+                has_diff || has_fix_commit
+            } else {
+                true
+            };
+            
+            let success = !is_empty_output && !is_analysis_only && has_real_evidence && (
+                has_fix_commit || (
+                    exit_code == 0 && (
+                        stdout.contains("修复完成") || stdout.contains("fix") || stdout.contains("resolved")
+                        || changes > 0
+                    )
                 )
             );
+            
+            // 记录判定原因（用于调试）
+            if !success {
+                let reason = if is_empty_output { "空输出" }
+                    else if is_analysis_only { "仅分析未修复" }
+                    else if !has_real_evidence { "声称已修复但无变更证据" }
+                    else { "codex 返回失败" };
+                tracing::warn!("[{}] Bug #{} 判定失败: {} (stdout_len={}, changes={})", 
+                    agent_name, bug_id, reason, stdout_trimmed.len(), changes);
+            }
 
             // Step 5: Run quality gates on the fix
             let gates_passed = if success {
@@ -801,6 +837,12 @@ fn run_codex_fix_impl(
                     false
                 }
             } else {
+                // ── 问题4: 验证失败日志增强 ──
+                tracing::error!("[{}] Bug #{} 修复判定失败 — 完整诊断:", agent_name, bug_id);
+                tracing::error!("[{}]   exit_code: {}", agent_name, exit_code);
+                tracing::error!("[{}]   changes: {}", agent_name, changes);
+                tracing::error!("[{}]   stdout前500字: {}", agent_name, stdout.chars().take(500).collect::<String>());
+                tracing::error!("[{}]   stderr前500字: {}", agent_name, stderr.chars().take(500).collect::<String>());
                 false
             };
 
@@ -818,12 +860,70 @@ fn run_codex_fix_impl(
                 true
             };
 
+            // ── 问题3: 无变更检测 — 有 fix_done 但 0 文件变更 = 无效修复 ──
+            if success && changes == 0 && !has_fix_commit {
+                tracing::warn!("[{}] Bug #{} 标记为成功但无文件变更，判定为无效修复", agent_name, bug_id);
+                // 不算成功，写入失败备注
+                let fail_comment = format!("【{}】Bug #{} Codex 输出了修复分析但未产生实际代码变更，需人工排查。", agent_name, bug_id);
+                let _ = comment_in_zentao(bug_id, &fail_comment);
+            }
+            
             // Only proceed to commit if all checks passed
-            let ok_to_commit = success && gates_passed && migrations_passed && sql_valid;
+            let ok_to_commit = success && gates_passed && migrations_passed && sql_valid && (changes > 0 || has_fix_commit);
 
             // Step 6: Auto-commit changes — only if gates + migrations passed
             if ok_to_commit && changes > 0 {
                 auto_commit_fix(agent_name, bug_id, bug_title, &stdout);
+            }
+            
+            // ── 问题5: 提交保障 — 检查是否有未提交的变更，有则强制 commit+push ──
+            if ok_to_commit && changes > 0 {
+                let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+                let status_output = Command::new("git")
+                    .args(["-C", &worktree, "status", "--porcelain"])
+                    .output();
+                let has_uncommitted = status_output.map(|o| {
+                    !String::from_utf8_lossy(&o.stdout).trim().is_empty()
+                }).unwrap_or(false);
+                
+                if has_uncommitted {
+                    tracing::warn!("[{}] Bug#{} 有未提交变更，强制 commit+push", agent_name, bug_id);
+                    // 强制 add + commit
+                    let _ = Command::new("git")
+                        .args(["-C", &worktree, "add", "--all"])
+                        .output();
+                    let commit_msg = format!("fix(#{}): {} — 兜底提交（AI Agent {} 自动修复）", 
+                        bug_id, bug_title, agent_name);
+                    let _ = Command::new("git")
+                        .args(["-C", &worktree, "commit", "-m", &commit_msg])
+                        .output();
+                    // 强制 push
+                    let _ = Command::new("git")
+                        .args(["-C", &worktree, "push", "origin", agent_name])
+                        .output();
+                    // Cherry-pick to develop
+                    let hash_output = Command::new("git")
+                        .args(["-C", &worktree, "rev-parse", "HEAD"])
+                        .output();
+                    if let Ok(ho) = hash_output {
+                        let hash = String::from_utf8_lossy(&ho.stdout).trim().to_string();
+                        if hash.len() >= 8 {
+                            let main_repo = "/root/.openclaw/workspace/his-repo";
+                            let _ = Command::new("git").args(["-C", main_repo, "fetch", "origin", "develop"]).output();
+                            let _ = Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
+                            let _ = Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
+                            let cherry = Command::new("git")
+                                .args(["-C", main_repo, "cherry-pick", &hash])
+                                .output();
+                            if cherry.map(|o| o.status.success()).unwrap_or(false) {
+                                let _ = Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
+                                tracing::info!("[{}] Bug#{} cherry-pick 到 develop 成功", agent_name, bug_id);
+                            } else {
+                                tracing::warn!("[{}] Bug#{} cherry-pick 失败，可能有冲突", agent_name, bug_id);
+                            }
+                        }
+                    }
+                }
             }
 
             // Step 7: Update Zentao — 不管成功失败都写备注
