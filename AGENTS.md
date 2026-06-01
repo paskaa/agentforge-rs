@@ -308,6 +308,18 @@ cargo run -- pipeline --max-bugs 5
 21. **测试失败禁止关禅道** — zhangfei 的 Playwright 测试或华佗的验收失败时，**禁止**调用 `resolve_bug_in_zentao()`。只有测试全部通过才能关禅道。
 22. **修复结果必须有全链路证据** — 每个标记为"已修复"的 bug，必须有：(1) verification event in traces (2) status=ok (3) 完整的 5 项检查结果存入 traces.detail。无证据的修复 = 假修复。
 23. **Executor 崩溃恢复** — 如果 executor 进程崩溃，Redis 中的 `codex_lock:{agent}` 必须在 TTL 过期后自动释放。新进程启动时必须检查并清理残留锁。
+24. **修复后必须本地编译验证** — 任何代码修复在 git push 之前，**必须**在本地执行编译验证：
+    - Java 项目：`mvn compile` 必须 BUILD SUCCESS
+    - Rust 项目：`cargo check` 必须通过
+    - 前端项目：`npm run build` 或 `vite build` 必须通过
+    - **禁止**未编译就 push。编译失败 = 浪费所有人时间。
+    - 验证范围：只验证修改的模块，不需要全量编译
+25. **接口签名变更必须检查兼容性** — 修改实现类时，必须确认：
+    - 方法签名与 interface 完全一致（参数数量、类型、返回值）
+    - 不删除 interface 中已定义的方法
+    - 不修改已有方法的参数列表
+    - 新增方法时同步更新 interface
+    - 编译验证是最后一道防线，但不能依赖它来发现签名问题 — 如果 executor 进程崩溃，Redis 中的 `codex_lock:{agent}` 必须在 TTL 过期后自动释放。新进程启动时必须检查并清理残留锁。
 
 ---
 
