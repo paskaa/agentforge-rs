@@ -697,6 +697,45 @@ fn run_codex_fix_impl(
             bug_details_text, prev_fix_context)
     };
 
+    // Step 1.7: 自动生成 Playwright 测试用例（修复前先设计测试）
+    let test_gen_script = "/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/utils/generate-bug-test.sh";
+    if std::path::Path::new(test_gen_script).exists() && agent_name == "zhaoyun" {
+        let test_output = Command::new("bash")
+            .arg(test_gen_script)
+            .arg(bug_id)
+            .arg(bug_title)
+            .output();
+        match test_output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                if stdout.contains("OK:") {
+                    tracing::info!("[{}] Bug#{} Playwright 测试用例已生成", agent_name, bug_id);
+                } else if stdout.contains("SKIP:") {
+                    tracing::info!("[{}] Bug#{} Playwright 测试用例已存在", agent_name, bug_id);
+                }
+            }
+            Err(e) => tracing::warn!("[{}] 生成测试用例失败: {}", agent_name, e),
+        }
+    }
+    
+    // Step 1.8: 运行修复前测试（应失败，作为基线）
+    let test_spec = format!("/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/specs/bug-{}.spec.ts", bug_id);
+    let pre_test_passed = if std::path::Path::new(&test_spec).exists() && agent_name == "zhaoyun" {
+        tracing::info!("[{}] Bug#{} 运行修复前基线测试...", agent_name, bug_id);
+        let pre_test = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1 | tail -20",
+                bug_id
+            ))
+            .output();
+        let passed = pre_test.map(|o| o.status.success()).unwrap_or(false);
+        tracing::info!("[{}] Bug#{} 修复前基线测试: {}", agent_name, bug_id, if passed { "通过(异常)" } else { "失败(预期)" });
+        passed
+    } else {
+        false
+    };
+
     // Step 2: Build harness-augmented prompt
     let prompt = build_harness_prompt(agent_name, bug_id, bug_title, &bug_details_text);
 

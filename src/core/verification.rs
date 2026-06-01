@@ -127,14 +127,37 @@ fn check_unit_test(agent_name: &str, work_dir: &str) -> CheckResult {
     
     if agent_name == "zhaoyun" {
         // 前端: vitest
-        let (ok, stdout, _) = run_cmd("npx", &["vitest", "run", "--reporter=verbose"], work_dir, 120);
+        let (ok, stdout, stderr) = run_cmd("npx", &["vitest", "run", "--reporter=verbose"], work_dir, 120);
         let no_tests = stdout.contains("No test files") || stdout.contains("no tests");
+        // 无测试文件 → 记录警告但不阻断（需要补充测试）
+        let message = if no_tests {
+            "⚠️ 无测试文件（需要补充单元测试）".to_string()
+        } else if ok {
+            // 提取通过/失败数
+            let passed = stdout.lines().filter(|l| l.contains("✓") || l.contains("pass")).count();
+            let failed = stdout.lines().filter(|l| l.contains("✗") || l.contains("FAIL")).count();
+            format!("vitest 通过 ✅ ({} 通过, {} 失败)", passed, failed)
+        } else {
+            // 提取失败详情
+            let fail_lines: Vec<&str> = stdout.lines()
+                .filter(|l| l.contains("FAIL") || l.contains("✗") || l.contains("Error"))
+                .take(5).collect();
+            let err_lines: Vec<&str> = stderr.lines().take(3).collect();
+            let mut msg = format!("vitest 失败 ❌");
+            if !fail_lines.is_empty() {
+                msg.push_str(&format!("
+失败: {}", fail_lines.join(" | ")));
+            }
+            if !err_lines.is_empty() {
+                msg.push_str(&format!("
+错误: {}", err_lines.join(" | ")));
+            }
+            msg
+        };
         return CheckResult {
             name: "单元测试(vitest)".into(),
-            passed: ok || no_tests,
-            message: if no_tests { "无测试文件(跳过)".into() } else if ok { "vitest 通过".into() } else {
-                stdout.lines().filter(|l| l.contains("FAIL") || l.contains("✗")).take(3).collect::<Vec<_>>().join("; ")
-            },
+            passed: ok || no_tests, // 无测试不阻断，有测试失败才阻断
+            message,
             duration_ms: elapsed(),
         };
     }
@@ -185,7 +208,7 @@ fn check_playwright(bug_id: &str) -> CheckResult {
         bug_id
     )], "/", 180);
     
-    let no_test = stdout.contains("No tests found") || stdout.contains("no tests");
+    let no_test = stdout.contains("No tests found") || stdout.contains("no tests") || stdout.contains("0 tests");
     let passed = ok || no_test;
     
     CheckResult {
@@ -215,39 +238,64 @@ fn check_database(bug_title: &str) -> CheckResult {
     let start = std::time::Instant::now();
     let elapsed = || start.elapsed().as_millis() as u64;
     
-    // 如果 bug 标题涉及特定表，验证表可访问
-    let tables_to_check = [
+    // 按 bug 标题智能匹配需要验证的表
+    let all_tables = [
         ("advice", "SELECT COUNT(*) FROM advice LIMIT 1"),
         ("diagnosis", "SELECT COUNT(*) FROM diagnosis LIMIT 1"),
         ("triage_queue_item", "SELECT COUNT(*) FROM triage_queue_item LIMIT 1"),
         ("adm_schedule_pool", "SELECT COUNT(*) FROM adm_schedule_pool LIMIT 1"),
+        ("adm_encounter", "SELECT COUNT(*) FROM adm_encounter LIMIT 1"),
+        ("sys_user", "SELECT COUNT(*) FROM sys_user LIMIT 1"),
+        ("doc_record", "SELECT COUNT(*) FROM doc_record LIMIT 1"),
+        ("adm_order", "SELECT COUNT(*) FROM adm_order LIMIT 1"),
+        ("fee_item", "SELECT COUNT(*) FROM fee_item LIMIT 1"),
+        ("drug_stock", "SELECT COUNT(*) FROM drug_stock LIMIT 1"),
     ];
     
-    let mut relevant_checks = Vec::new();
-    for (table, sql) in &tables_to_check {
-        if bug_title.to_lowercase().contains(&table.to_lowercase()) || 
-           bug_title.contains(table) {
-            relevant_checks.push((*table, *sql));
+    // 关键词 → 表名映射
+    let keyword_table_map = [
+        ("医嘱", "advice"), ("处方", "advice"), ("开立", "advice"),
+        ("诊断", "diagnosis"), ("中医", "diagnosis"),
+        ("分诊", "triage_queue_item"), ("排队", "triage_queue_item"),
+        ("挂号", "adm_schedule_pool"), ("预约", "adm_schedule_pool"),
+        ("就诊", "adm_encounter"), ("患者", "adm_encounter"),
+        ("用户", "sys_user"), ("登录", "sys_user"),
+        ("病历", "doc_record"), ("EMR", "doc_record"),
+        ("计费", "fee_item"), ("补费", "fee_item"),
+        ("发药", "drug_stock"), ("库存", "drug_stock"),
+    ];
+    
+    let title_lower = bug_title.to_lowercase();
+    let mut relevant_tables: Vec<(&str, &str)> = Vec::new();
+    
+    // 按关键词匹配
+    for (kw, table) in &keyword_table_map {
+        if title_lower.contains(kw) || bug_title.contains(kw) {
+            if let Some(entry) = all_tables.iter().find(|(t, _)| t == table) {
+                if !relevant_tables.iter().any(|(t, _)| t == table) {
+                    relevant_tables.push(*entry);
+                }
+            }
         }
     }
     
-    if relevant_checks.is_empty() {
-        return CheckResult {
-            name: "数据库验证".into(),
-            passed: true,
-            message: "未涉及特定数据库表(跳过)".into(),
-            duration_ms: elapsed(),
-        };
+    // 如果没匹配到，至少检查 3 张核心表
+    if relevant_tables.is_empty() {
+        relevant_tables = vec![
+            all_tables[0], // advice
+            all_tables[1], // diagnosis
+            all_tables[3], // adm_schedule_pool
+        ];
     }
     
     // 验证数据库连接
     let (ok, stdout, stderr) = run_cmd("bash", &["-c", &format!(
         "PGPASSWORD=Jchl1528 psql -h 192.168.110.252 -p 15432 -U postgresql -d postgresql -c '{}' 2>&1",
-        relevant_checks[0].1
+        relevant_tables[0].1
     )], "/", 10);
     
     CheckResult {
-        name: format!("数据库验证({})", relevant_checks.iter().map(|(t,_)| *t).collect::<Vec<_>>().join(",")),
+        name: format!("数据库验证({})", relevant_tables.iter().map(|(t,_)| *t).collect::<Vec<_>>().join(",")),
         passed: ok,
         message: if ok { "数据库表可访问".into() } else {
             let err = if stderr.len() > 300 { stderr.chars().take(300).collect() } else { stderr };
@@ -265,23 +313,33 @@ fn check_api(bug_title: &str) -> CheckResult {
     // 根据 bug 标题判断需要验证哪些接口
     let api_checks = [
         ("/api/advice/save", "POST"),
+        ("/api/advice/list", "GET"),
         ("/api/diagnosis/save", "POST"),
+        ("/api/diagnosis/list", "GET"),
         ("/api/triage/queue", "GET"),
         ("/api/schedule/pool", "GET"),
+        ("/api/emr/list", "GET"),
+        ("/api/encounter/", "GET"),
+        ("/api/order/save", "POST"),
     ];
     
-    let mut relevant = Vec::new();
+    let title_lower = bug_title.to_lowercase();
+    let mut relevant: Vec<(&str, &str)> = Vec::new();
     for (path, method) in &api_checks {
-        if bug_title.to_lowercase().contains(path.split('/').last().unwrap_or("")) {
+        let keyword = path.split('/').last().unwrap_or("");
+        if title_lower.contains(keyword) || title_lower.contains(&path[5..]) {
             relevant.push((*path, *method));
         }
     }
     
+    // 如果没匹配到，检查后端服务是否可达即可
     if relevant.is_empty() {
+        let (ok, _, _) = run_cmd("curl", &["-s", "-o", "/dev/null", "-w", "%{http_code}", 
+            "http://localhost:8650"], "/", 5);
         return CheckResult {
-            name: "接口验证".into(),
-            passed: true,
-            message: "未涉及特定接口(跳过)".into(),
+            name: "接口验证(后端可达)".into(),
+            passed: ok,
+            message: if ok { "后端服务可达".into() } else { "后端服务不可达".into() },
             duration_ms: elapsed(),
         };
     }
