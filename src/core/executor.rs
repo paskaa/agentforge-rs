@@ -667,11 +667,20 @@ impl AgentExecutor {
                 "=== Playwright 回归测试结果 ===\n测试标签: @bug{}\n执行模式: 无头浏览器 (chromium)\n\n{}\n\n✅ 全部测试通过",
                 bid, _test_summary
             );
-            // 禅道标记为已解决（comment 已内嵌在 resolve 中）
-            let _ = tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(format!("{}/zentao-write-bug.sh resolve {} 'Playwright回归测试通过，BUG已修复'", self.zentao_dir, bid))
-                .output().await;
+            // 禅道标记为已解决 + 添加测试报告
+            {
+                let cfg = crate::config::Config::load().ok();
+                if let Some(cfg) = cfg {
+                    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                    let test_report = format!(
+                        "[🔥 张飞测试报告] Bug #{} Playwright回归测试\n\n                        测试状态：✅ 通过\n                        测试标签：@bug{}\n                        执行模式：无头浏览器 (chromium)\n                        测试输出摘要：\n{}\n\n                        结论：回归测试通过，BUG已修复",
+                        bid, bid,
+                        _test_summary.chars().take(500).collect::<String>()
+                    );
+                    let _ = client.comment_bug(&bid, &test_report).await;
+                    let _ = client.resolve_bug(&bid, "Playwright回归测试通过，BUG已修复").await;
+                }
+            }
 
             // 保存测试文档
             let test_doc = format!("# Bug #{} 回归测试\n\n**Playwright 测试通过**\n\n测试标签: @bug{}", bid, bid);
@@ -732,9 +741,33 @@ impl AgentExecutor {
         let bid = pipeline::extract_bug_id(msg); let rep = pipeline::extract_reporter(msg);
         let test_doc: Option<String> = self.redis.clone().get(format!("test_doc:{}", bid)).await.ok();
         if test_doc.is_none() { let _ = self.feishu.send(&format!("⚠️ Bug #{} 验收失败：无测试文档", bid), None).await; return; }
-        if pipeline::is_human(&rep) { let _ = self.feishu.send(&format!("Bug #{} 验收通过（人类 {}）。", bid, rep), None).await; return; }
-        let _ = tokio::process::Command::new("bash").arg("-c").arg(format!("{}/zentao-write-bug.sh resolve {} '验收通过'", self.zentao_dir, bid)).output().await;
-        let _ = tokio::process::Command::new("bash").arg("-c").arg(format!("{}/zentao-write-bug.sh assign {} {} '验收通过'", self.zentao_dir, bid, rep)).output().await;
+        if pipeline::is_human(&rep) {
+            // 人类提的bug：只加备注，不改状态和分配
+            let cfg = crate::config::Config::load().ok();
+            if let Some(cfg) = cfg {
+                let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                let _ = client.comment_bug(&bid, &format!(
+                    "[💊 华佗验收] Bug #{} 验收通过\n\n                    验收人：华佗\n                    提出人：{}（人类）\n                    测试文档：已确认\n                    验收结果：通过",
+                    bid, rep
+                )).await;
+            }
+            let _ = self.feishu.send(&format!("Bug #{} 验收通过（人类 {}）。", bid, rep), None).await;
+            self.traces.log("huatuo", "verify_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok"), None).await;
+            self.traces.publish_trace_for_ws("huatuo", "verify_done", &format!("Bug#{}", bid), "验收完成（人类）", "ok", 0).await;
+            return;
+        }
+        // 智能体提的bug：加备注 + 解决 + 分配给提出人
+        let cfg = crate::config::Config::load().ok();
+        if let Some(cfg) = cfg {
+            let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+            let verify_comment = format!(
+                "[💊 华佗验收] Bug #{} 验收通过\n\n                验收人：华佗\n                提出人：{}\n                测试文档：已确认\n                验收结果：通过\n                操作：标记为已解决，分配给提出人",
+                bid, rep
+            );
+            let _ = client.comment_bug(&bid, &verify_comment).await;
+            let _ = client.resolve_bug(&bid, "验收通过").await;
+            let _ = client.assign_bug(&bid, &rep, "验收通过，分配给提出人确认").await;
+        }
         let _ = self.feishu.send(&format!("✅ Bug #{} 验收通过。", bid), None).await;
         self.traces.log("huatuo", "verify_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok"), None).await;
         self.traces.publish_trace_for_ws("huatuo", "verify_done", &format!("Bug#{}", bid), "验收完成", "ok", 0).await;
@@ -742,8 +775,25 @@ impl AgentExecutor {
 
     async fn handle_chenlin_doc(&self, msg: &str) {
         let bid = pipeline::extract_bug_id(msg);
-        let doc = format!("# Bug #{} 修复文档\n\n**时间**: {}\n\n{}\n\n✅ 测试通过 ✅ 验收通过", bid, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), msg.chars().take(300).collect::<String>());
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        // 生成完整归档文档
+        let doc = format!(
+            "# Bug #{} 修复文档\n\n            **时间**: {}\n\n            **流程记录**:\n{}\n\n            ✅ 测试通过 ✅ 验收通过 ✅ 文档归档",
+            bid, ts, msg.chars().take(500).collect::<String>()
+        );
         let _: redis::RedisResult<()> = self.redis.clone().set_ex(format!("fix_doc:{}", bid), &doc, 30*86400).await;
+        // 写入禅道备注：归档信息
+        {
+            let cfg = crate::config::Config::load().ok();
+            if let Some(cfg) = cfg {
+                let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                let archive_comment = format!(
+                    "[📝 陈琳归档] Bug #{} 修复文档已归档\n\n                    归档时间：{}\n                    流程完成：诸葛亮分析 → 张飞测试 → 华佗验收 → 陈琳归档\n                    状态：✅ 全流程完成",
+                    bid, ts
+                );
+                let _ = client.comment_bug(&bid, &archive_comment).await;
+            }
+        }
         let _ = self.feishu.send(&format!("📚 Bug #{} 文档已归档。", bid), None).await;
         self.traces.log("chenlin", "doc_done", Some(&format!("Bug#{}", bid)), None, None, None, None, Some("ok"), None).await;
         self.traces.publish_trace_for_ws("chenlin", "doc_done", &format!("Bug#{}", bid), "归档完成", "ok", 0).await;
@@ -926,6 +976,20 @@ impl AgentExecutor {
         
         tracing::info!("[zhugeliang] Bug #{} routed to {} (db_review={})", bid, next, needs_db_review);
         let _ = self.feishu.send(&format!("🔀 Bug #{} 路由：{} → {}", bid, sender, next), None).await;
+        // 写入禅道备注：分析结果
+        {
+            let cfg = crate::config::Config::load().ok();
+            if let Some(cfg) = cfg {
+                let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                let comment = format!(
+                    "[🤖 诸葛亮分析] Bug #{} 路由决策\n\n                    分析结果：{}\n                    修复智能体：{}\n                    需要DB审查：{}\n                    路由目标：{}",
+                    bid,
+                    if needs_db_review { "涉及数据库变更，需要荀彧DB审查" } else { "无数据库变更，直接进入测试" },
+                    sender, needs_db_review, next
+                );
+                let _ = client.comment_bug(&bid, &comment).await;
+            }
+        }
         self.traces.log("zhugeliang", "analyze_done", Some(&format!("Bug#{}", bid)), Some(&format!("routed_to={} db={}", next, needs_db_review)), None, None, None, Some("ok"), None).await;
         self.traces.publish_trace_for_ws("zhugeliang", "analyze_done", &format!("Bug#{}", bid), &format!("路由到{} DB审查={}", next, needs_db_review), "ok", 0).await;
     }
@@ -968,6 +1032,16 @@ impl AgentExecutor {
         if review_passed {
             tracing::info!("[xunyu] Bug #{} DB review PASSED", bid);
             let _ = self.feishu.send(&format!("✅ Bug #{} DB 审查通过。", bid), None).await;
+            // 写入禅道备注
+            {
+                let cfg = crate::config::Config::load().ok();
+                if let Some(cfg) = cfg {
+                    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                    let _ = client.comment_bug(&bid, &format!(
+                        "[📚 荀彧DB审查] Bug #{} DB审查通过\n\n审查结果：无数据库变更风险，直接进入测试阶段", bid
+                    )).await;
+                }
+            }
             
             // 路由到 Zhangfei 测试
             let next_msg = format!("请测试 Bug #{} 的修复情况。提出人: {}。", bid, reporter);
@@ -988,6 +1062,16 @@ impl AgentExecutor {
         } else {
             tracing::warn!("[xunyu] Bug #{} DB review FAILED — missing migration script", bid);
             let _ = self.feishu.send(&format!("⚠️ Bug #{} DB 审查失败：缺少迁移脚本，退回修复 Agent。", bid), None).await;
+            // 写入禅道备注
+            {
+                let cfg = crate::config::Config::load().ok();
+                if let Some(cfg) = cfg {
+                    let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                    let _ = client.comment_bug(&bid, &format!(
+                        "[📚 荀彧DB审查] Bug #{} DB审查未通过\n\n审查结果：检测到数据库变更但缺少迁移脚本\n要求：补充DB迁移脚本后重新提交", bid
+                    )).await;
+                }
+            }
             // 退回修复 Agent
             let sender = msg.split("修复 Agent:").nth(1).and_then(|s| s.split(',').next()).map(|s| s.trim()).unwrap_or("zhaoyun");
             let rework_msg = format!("Bug #{} DB 审查未通过：需要创建 DB 迁移脚本。请补充。", bid);
