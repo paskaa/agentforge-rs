@@ -230,30 +230,60 @@ impl ZentaoClient {
     }
 
     /// 给 Bug 添加备注（不改状态）
+    /// 给 Bug 添加备注（不改状态）
+    /// Zentao REST API 没有独立的 comment 端点，
+    /// 通过 resolve + activate workaround 实现：
+    /// 1. resolve（带 comment）→ 写入备注
+    /// 2. activate（恢复状态）→ 不改状态
     pub async fn comment_bug(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
-        // CLI-based comment (HTTP API comment endpoint not available in this Zentao version)
-        let cli = "/usr/local/bin/zentao";
-        let result = std::process::Command::new(cli)
-            .args(["bug", "update", "--id", bug_id, "--comment", comment])
-            .output();
-        match result {
-            Ok(o) if o.status.success() => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                if stdout.contains("success") || stdout.contains("保存成功") {
-                    tracing::info!("[zentao] Bug #{} 备注已添加 (CLI)", bug_id);
-                    return Ok(());
-                }
-                tracing::warn!("[zentao] Bug #{} CLI 备注异常: {}", bug_id, stdout);
+        // Step 1: Resolve with comment (this actually writes the comment)
+        let resolve_url = format!("{}/api.php/v1/bugs/{}/resolve", self.base_url, bug_id);
+        let resolve_body = serde_json::json!({
+            "resolution": "fixed", "resolvedBuild": "trunk",
+            "comment": comment
+        });
+        let resp = self.client.post(&resolve_url)
+            .header("Token", &self.token)
+            .json(&resolve_body)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                tracing::info!("[zentao] Bug #{} 备注已添加 (resolve+comment)", bug_id);
             }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                tracing::warn!("[zentao] Bug #{} CLI 备注失败: {}", bug_id, stderr);
+            Ok(r) => {
+                let text = r.text().await.unwrap_or_default();
+                tracing::warn!("[zentao] Bug #{} resolve for comment failed: {}", bug_id, text);
+                anyhow::bail!("Zentao resolve for comment failed: {}", text);
             }
             Err(e) => {
-                tracing::warn!("[zentao] Bug #{} CLI 备注错误: {}", bug_id, e);
+                tracing::warn!("[zentao] Bug #{} resolve for comment error: {}", bug_id, e);
+                anyhow::bail!("Zentao resolve for comment error: {}", e);
             }
         }
-        anyhow::bail!("Zentao comment failed for Bug #{}", bug_id)
+        // Step 2: Activate to restore status (comment is already written)
+        let activate_url = format!("{}/api.php/v1/bugs/{}/activate", self.base_url, bug_id);
+        let activate_body = serde_json::json!({
+            "openedBuild": "trunk"
+        });
+        let resp2 = self.client.post(&activate_url)
+            .header("Token", &self.token)
+            .json(&activate_body)
+            .send()
+            .await;
+        match resp2 {
+            Ok(r) if r.status().is_success() => {
+                tracing::info!("[zentao] Bug #{} 状态已恢复 (activate)", bug_id);
+            }
+            Ok(r) => {
+                let text = r.text().await.unwrap_or_default();
+                tracing::warn!("[zentao] Bug #{} activate restore failed: {} (备注已写入)", bug_id, text);
+            }
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} activate restore error: {} (备注已写入)", bug_id, e);
+            }
+        }
+        Ok(())
     }
 
     pub async fn assign_bug(&self, bug_id: &str, assign_to: &str, comment: &str) -> anyhow::Result<()> {
