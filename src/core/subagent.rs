@@ -775,9 +775,10 @@ fn run_codex_fix_impl(
             }
             Err(e) => (false, format!("执行失败: {}", e)),
         };
-        // 截取关键日志（最后 500 字符）
         let log_summary = if output.len() > 500 {
-            format!("...{}", &output[output.len()-500..])
+            let char_count = output.chars().count();
+            let skipped = output.chars().skip(char_count.saturating_sub(500));
+            format!("...{}", skipped.collect::<String>())
         } else {
             output.clone()
         };
