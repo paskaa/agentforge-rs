@@ -798,6 +798,49 @@ impl AgentExecutor {
             }
         }
 
+        // 🔴 铁律: 检查后端服务是否已重新编译部署
+        {
+            // 获取后端服务启动时间
+            let status_output = std::process::Command::new("systemctl")
+                .args(["show", "his-backend.service", "--property=ActiveEnterTimestamp"])
+                .output();
+            // 获取修复commit时间
+            let commit_output = std::process::Command::new("git")
+                .args(["log", "origin/develop", "--format=%ai", "-1", "--grep", &format!("#{}", bid)])
+                .current_dir("/root/.openclaw/workspace/his-repo")
+                .output();
+            if let (Ok(s), Ok(c)) = (status_output, commit_output) {
+                let start_str = String::from_utf8_lossy(&s.stdout).replace("ActiveEnterTimestamp=", "").trim().to_string();
+                let commit_str = String::from_utf8_lossy(&c.stdout).trim().to_string();
+                if !start_str.is_empty() && !commit_str.is_empty() {
+                    // 简单比较：如果服务启动时间早于commit时间，说明未重新部署
+                    if start_str < commit_str {
+                        tracing::warn!("[huatuo] Bug#{} 后端服务({})早于修复commit({})，未重新编译部署", bid, start_str, commit_str);
+                        let _ = self.feishu.send(&format!("❌ Bug #{} 验收失败：后端服务未重新编译部署！
+服务启动: {}
+修复时间: {}
+请先 mvn package + systemctl restart his-backend", bid, start_str, commit_str), None).await;
+                        let cfg = crate::config::Config::load().ok();
+                        if let Some(cfg) = cfg {
+                            let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                            let _ = client.comment_bug(&bid, &format!(
+                                "[🚫 华佗验收] Bug #{} 验收失败
+
+原因：后端服务未重新编译部署
+服务启动时间: {}
+修复commit时间: {}
+要求：mvn package -DskipTests + systemctl restart his-backend 后重新验收", bid, start_str, commit_str
+                            )).await;
+                        }
+                        self.traces.log("huatuo", "verify_done", Some(&format!("Bug#{}", bid)), Some("rejected: not deployed"), None, None, None, Some("failed"), None).await;
+                        self.publish_trace("huatuo", "verify_done", &format!("Bug#{}", bid), "验收失败：未编译部署", "failed", 0).await;
+                        return;
+                    }
+                    tracing::info!("[huatuo] Bug#{} 后端服务({})晚于修复commit({})，已部署", bid, start_str, commit_str);
+                }
+            }
+        }
+
         let test_doc: Option<String> = self.redis.clone().get(format!("test_doc:{}", bid)).await.ok();
         if test_doc.is_none() { let _ = self.feishu.send(&format!("⚠️ Bug #{} 验收失败：无测试文档", bid), None).await; return; }
         if pipeline::is_human(&rep) {

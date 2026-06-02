@@ -246,6 +246,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - **commit 前必须验证** — mvn compile/vue-tsc 0 error + 无新增 lint 警告
 - **🔴 修复必须合并到 develop 分支** — 工作树 commit 不等于生效！必须 git merge 或 cherry-pick 到 develop，否则修复不会部署。修复后立即执行: `cd his-repo && git merge <worktree-branch> && git push origin develop`
 - **🔴 未合并到 develop 的修复等于没修** — 华佗验收时必须检查 develop 分支上是否有该 commit，没有则拒绝验收
+- **🔴 修复必须编译部署后才算完成** — 合并到 develop 后必须: `cd openhis-server-new && mvn package -DskipTests` 编译 jar → `systemctl restart his-backend` 重启服务 → 验证服务启动时间晚于 commit 时间。未编译部署的修复等于没修
 
 ### 🔴 归档铁律（三重写入）
 - **陈琳归档必须三重写入** — Git(docs/bug-fixes/bug-<id>.md) + SQLite(bug_reports 表) + Redis(fix_doc:<id>)
