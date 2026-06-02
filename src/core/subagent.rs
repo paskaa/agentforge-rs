@@ -293,6 +293,23 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - `rg "状态枚举名|相关方法名|相关字段名" --type java --type vue`
 - 确保不遗漏任何引用路径
 
+### 🔴 状态变更影响面分析铁律（来自 Bug #574→575 教训）
+- **改任何状态枚举值前，必须执行影响面分析**：
+  1. `rg "原状态枚举名" --type java` 列出所有引用文件
+  2. 逐个检查每个引用：是设置值？查询过滤？显示映射？统计聚合？
+  3. 检查逆向流程：退号、取消、停诊等是否兼容新状态
+  4. 检查 XML mapper 中的所有查询过滤条件
+  5. 检查前端 STATUS_CLASS_MAP 和所有 v-if/v-for 条件
+- **禁止**：只改正向流程不验逆向流程
+
+### 🔴 逆向流程验证铁律（来自 Bug #575 教训）
+- 涉及状态流转的 Bug，验证时必须覆盖：
+  - 正向：预约→签到→就诊→完成
+  - 逆向：退号、取消预约、停诊、退费
+  - 边界：并发操作、重复操作、异常中断
+- **禁止**：只测正向流程就标记"修复完成"
+- **验证清单**：修复后必须逐项确认每个状态流转路径都正常
+
 ```
 # 数据库查询示例
 db-query hisdev "SELECT column_name, is_nullable, data_type FROM information_schema.columns WHERE table_name='表名' ORDER BY ordinal_position;"
