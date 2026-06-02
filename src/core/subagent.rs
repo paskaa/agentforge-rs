@@ -242,8 +242,10 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - **已关闭/已解决的 Bug 禁止处理** — 处理前必须检查禅道状态，status=resolved/closed 的 Bug 直接跳过，不修改不测试
 - **人类提的 Bug 只加备注不改状态** — reporter 是人类账号(chenxj/yangkexiang 等)时，不改 status、不改 assignedTo，只添加备注
 - **智能体提的 Bug 可改分配和加备注** — 但状态变更必须等测试通过后由华佗确认
-- **每个修复必须有 git commit** — commit message 格式: `fix(#bug_id): 简要描述`，推送到 develop 分支
+- **每个修复必须有 git commit** — commit message 格式: `fix(#bug_id): 简要描述`
 - **commit 前必须验证** — mvn compile/vue-tsc 0 error + 无新增 lint 警告
+- **🔴 修复必须合并到 develop 分支** — 工作树 commit 不等于生效！必须 git merge 或 cherry-pick 到 develop，否则修复不会部署。修复后立即执行: `cd his-repo && git merge <worktree-branch> && git push origin develop`
+- **🔴 未合并到 develop 的修复等于没修** — 华佗验收时必须检查 develop 分支上是否有该 commit，没有则拒绝验收
 
 ### 🔴 归档铁律（三重写入）
 - **陈琳归档必须三重写入** — Git(docs/bug-fixes/bug-<id>.md) + SQLite(bug_reports 表) + Redis(fix_doc:<id>)

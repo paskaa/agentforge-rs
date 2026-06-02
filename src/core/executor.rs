@@ -761,6 +761,43 @@ impl AgentExecutor {
 
     async fn handle_pipeline_verify(&self, msg: &str) {
         let bid = pipeline::extract_bug_id(msg); let rep = pipeline::extract_reporter(msg);
+
+        // 🔴 铁律: 检查修复是否已合并到 develop 分支
+        {
+            let his_repo = "/root/.openclaw/workspace/his-repo";
+            let git_log = std::process::Command::new("git")
+                .args(["log", "origin/develop", "--oneline", "--grep", &format!("#{}", bid)])
+                .current_dir(his_repo)
+                .output();
+            match git_log {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if stdout.trim().is_empty() {
+                        tracing::warn!("[huatuo] Bug#{} 修复未合并到 develop 分支，拒绝验收", bid);
+                        let _ = self.feishu.send(&format!("❌ Bug #{} 验收失败：修复未合并到 develop 分支！请先合并再验收。", bid), None).await;
+                        // 写入禅道备注
+                        let cfg = crate::config::Config::load().ok();
+                        if let Some(cfg) = cfg {
+                            let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                            let _ = client.comment_bug(&bid, &format!(
+                                "[🚫 华佗验收] Bug #{} 验收失败
+
+原因：修复代码未合并到 develop 分支，修复不会部署到生产环境
+要求：先执行 git merge 到 develop 后重新提交验收", bid
+                            )).await;
+                        }
+                        self.traces.log("huatuo", "verify_done", Some(&format!("Bug#{}", bid)), Some("rejected: not on develop"), None, None, None, Some("failed"), None).await;
+                        self.publish_trace("huatuo", "verify_done", &format!("Bug#{}", bid), "验收失败：未合并到develop", "failed", 0).await;
+                        return;
+                    }
+                    tracing::info!("[huatuo] Bug#{} develop 分支确认有修复 commit", bid);
+                }
+                Err(e) => {
+                    tracing::warn!("[huatuo] 无法检查 develop 分支: {}", e);
+                }
+            }
+        }
+
         let test_doc: Option<String> = self.redis.clone().get(format!("test_doc:{}", bid)).await.ok();
         if test_doc.is_none() { let _ = self.feishu.send(&format!("⚠️ Bug #{} 验收失败：无测试文档", bid), None).await; return; }
         if pipeline::is_human(&rep) {
