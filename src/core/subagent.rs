@@ -184,6 +184,9 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     let agents_md_path = "/root/.openclaw/workspace/his-repo/AGENTS.md";
     let agents_md_hint = load_skill(agents_md_path)
         .lines().take(30).collect::<Vec<_>>().join("\n");
+    
+    // 加载统一铁律文件
+    let iron_laws = load_skill("/root/.codex/rules/IRON_LAWS.md");
 
     // Find agent role info
     let role_info = AGENT_ROLES.iter().find(|r| r.0 == agent_name);
@@ -221,94 +224,12 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 4. **Verify**: 修改后运行编译/语法检查
 5. **Cleanup**: 不留临时文件或调试代码
 
-### 约束铁律
+### 铁律（完整版见 /root/.codex/rules/IRON_LAWS.md，运行时自动加载）
 - 安全 > 架构 > 质量 > 性能
 - 禁止硬编码密钥/密码
 - 涉及 Mapper XML 时，UNION ALL 所有子查询统一修改
 - 涉及数据库字段时，走通全链路：前端→API→Service→Mapper→DB
 - 涉及交互/状态变更的 BUG：必须同时分析「发起方📤」和「接收方📥」两端
-  - 发起方：操作触发端（如护士退回）— 录入/提交是否正常？
-  - 接收方：信息展示端（如医生查看）— 查询/展示是否正常？
-  - 两端都要跑一次 6 环分析，分别标记状态
-
-### 🔴 修复质量铁律（零容忍）
-- **修前必须完整获取 Bug 全部信息** — 包括禅道描述、复现步骤、所有截图/附件图片、所有备注/评论历史。禁止只看标题就写代码。
-- **修复必须走全链路 6 环验证** — ①前端→②Controller→③Service→④Mapper→⑤DB→⑥关联模块，任一环节不通过=阻断提交
-- **测试必须完整严肃** — 编译(mvn compile/vue-tsc) 0 error + 单元测试通过 + Playwright 回归测试通过 + 按禅道复现步骤手动验证
-- **已有 commit 也必须验证** — develop 有 commit ≠ bug 已修好，必须 git show 检查 + 重新测试 + 检查禅道备注
-- **修复备注必须包含完整证据** — 根因(文件/函数/行) + 修复方案 + 验证结果(日志) + 影响范围 + 6环验证表
-
-### 🔴 Bug 状态铁律（零容忍）
-- **已关闭/已解决的 Bug 禁止处理** — 处理前必须检查禅道状态，status=resolved/closed 的 Bug 直接跳过，不修改不测试
-- **人类提的 Bug 只加备注不改状态** — reporter 是人类账号(chenxj/yangkexiang 等)时，不改 status、不改 assignedTo，只添加备注
-- **智能体提的 Bug 可改分配和加备注** — 但状态变更必须等测试通过后由华佗确认
-- **每个修复必须有 git commit** — commit message 格式: `fix(#bug_id): 简要描述`
-- **🔴 修复完成必须提交** — 代码修改后必须执行 `git add --all && git commit && git push`，未提交的修复等于没修。框架会自动检测未提交变更并强制提交，但智能体应主动完成提交流程
-- **commit 前必须验证** — mvn compile/vue-tsc 0 error + 无新增 lint 警告
-- **🔴 修复必须合并到 develop 分支** — 工作树 commit 不等于生效！必须 git merge 或 cherry-pick 到 develop，否则修复不会部署。修复后立即执行: `cd his-repo && git merge <worktree-branch> && git push origin develop`
-- **🔴 未合并到 develop 的修复等于没修** — 华佗验收时必须检查 develop 分支上是否有该 commit，没有则拒绝验收
-- **🔴 修复必须编译部署后才算完成** — 合并到 develop 后必须: `cd openhis-server-new && mvn package -DskipTests` 编译 jar → `systemctl restart his-backend` 重启服务 → 验证服务启动时间晚于 commit 时间。未编译部署的修复等于没修
-
-### 🔴 归档铁律（三重写入）
-- **陈琳归档必须三重写入** — Git(docs/bug-fixes/bug-<id>.md) + SQLite(bug_reports 表) + Redis(fix_doc:<id>)
-- **SQLite 归档必须使用完整字段** — bug_id, title, reporter, commit_hash, fix_files, test_result, test_output, pipeline_json, report_md, duration_ms
-- **禅道备注格式固定** — `[📝 陈琳归档] Bug #xxx 修复报告已归档`，使用 resolve+activate workaround
-- **归档报告必须包含** — 基本信息 + 根因分析 + 修复文件 + 流程时间线表
-
-### 🔴 测试重试铁律
-- **测试失败自动重试** — 张飞测试失败后退回原修复智能体，重试计数+1
-- **最多重试 3 次** — 超过 3 次通知人工介入，不再自动重试
-- **DB审查失败自动回退** — 荀彧审查失败后路由回原修复智能体，附带失败原因
-- **重试时必须读取上次失败原因** — 不能盲目重试，必须针对失败点修复
-
-### 🔴 数据库铁律（涉及 SQL/数据表/Mapper 的 Bug 必须遵守）
-- **修前必须查询真实数据库** — 用 `db-query hisdev "..."` 连接数据库，确认表结构、字段约束、索引
-- **禁止凭猜测写 SQL** — 必须先 `db-query hisdev "\d table_name"` 查看表结构，确认字段名和类型
-- **修改 SQL 后必须验证** — 在数据库中执行 `EXPLAIN` 或实际查询验证 SQL 语法正确
-- **NOT NULL 约束必须检查** — INSERT/UPDATE 前先查 `is_nullable` 字段，确保不违反约束
-- **关联表必须查完整** — 涉及 JOIN 的 SQL，必须查所有关联表的结构和外键关系
-- **数据库连接**: `db-query <schema> "<SQL>"`（schema 默认 hisdev）
-
-### 🔴 状态值一致性铁律（来自 Bug #574 教训）
-- **修改任何状态值前，必须列出完整状态流转链路**
-- **检查项**：①枚举定义值 ②Service设置值 ③查询映射 ④前端STATUS_CLASS_MAP ⑤前端v-if条件 ⑥统计SQL
-- **禁止**：只改一端不检查其他端。必须全链路对齐。
-- **全链路验证顺序**：数据库写入→后端接口映射→前端显示文本→前端按钮状态→统计数据
-
-### 🔴 禁止删除源文件铁律
-- **绝对禁止**删除项目中已有的 Java/Vue/SQL 源文件
-- 编译错误 → 修复错误，不删除文件
-- 重复文件 → 重构合并，不删除文件
-- AI 幻觉文件 → 检查 `git ls-tree baseline -- <file>` 确认后再删除
-- **唯一例外**：人类明确确认删除
-
-### 🔴 禁止修改已有公开方法签名铁律
-- 不能删除或重命名已有的 public 方法
-- 不能修改已有方法的参数列表
-- 需要新功能 → 添加重载方法
-- 需要改行为 → 修改方法内部实现
-
-### 🔴 搜索所有相关代码路径铁律
-- 修复前必须用 `rg` 搜索所有引用该状态/方法/字段的代码
-- `rg "状态枚举名|相关方法名|相关字段名" --type java --type vue`
-- 确保不遗漏任何引用路径
-
-### 🔴 状态变更影响面分析铁律（来自 Bug #574→575 教训）
-- **改任何状态枚举值前，必须执行影响面分析**：
-  1. `rg "原状态枚举名" --type java` 列出所有引用文件
-  2. 逐个检查每个引用：是设置值？查询过滤？显示映射？统计聚合？
-  3. 检查逆向流程：退号、取消、停诊等是否兼容新状态
-  4. 检查 XML mapper 中的所有查询过滤条件
-  5. 检查前端 STATUS_CLASS_MAP 和所有 v-if/v-for 条件
-- **禁止**：只改正向流程不验逆向流程
-
-### 🔴 逆向流程验证铁律（来自 Bug #575 教训）
-- 涉及状态流转的 Bug，验证时必须覆盖：
-  - 正向：预约→签到→就诊→完成
-  - 逆向：退号、取消预约、停诊、退费
-  - 边界：并发操作、重复操作、异常中断
-- **禁止**：只测正向流程就标记"修复完成"
-- **验证清单**：修复后必须逐项确认每个状态流转路径都正常
 
 ```
 # 数据库查询示例
@@ -367,6 +288,8 @@ db-query hisdev "SELECT * FROM 表名 WHERE 条件 LIMIT 10; (验证数据)"
 
 ## 项目规则摘要
 {agents_md_hint}
+
+{iron_laws}
 
 ---
 
