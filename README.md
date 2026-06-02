@@ -235,14 +235,21 @@ agentforge-rust@zhugeliang.service  # 诸葛亮 executor
 
 ## 🔧 Iron Rules (铁律)
 
+> **18 comprehensive iron rules** — see [agentforge-harness-skill](https://github.com/paskaa/agentforge-harness-skill) for the full set.
+
 | # | Rule | Description |
 |---|---|---|
-| 1 | 先分解再行动 | Any non-trivial task → plan first |
-| 2 | 并行优先 | Independent operations must be batched |
-| 3 | 验证后信 | Verify every tool call result |
-| 4 | 上下文 40% 阈值 | Suggest `/compact` near limit |
-| 5 | AGENTS.md 是地图 | Detailed rules in `docs/` |
-| 24 | 编译验证 | Must compile before push |
+| 1 | Bug状态管理 | Skip resolved/closed bugs |
+| 2 | 修复流程 | One bug at a time |
+| 3 | 全链路6环 | Frontend→Controller→Service→Mapper→DB→Relations |
+| 4 | 状态值一致性 | Check 6 places before changing status |
+| 5 | 影响面分析 | Search all references with `rg` |
+| 6 | 逆向流程验证 | Test cancel/refund/stop flows |
+| 7 | 全链路验证 | DB→Backend→Frontend→Stats |
+| 8 | 池/统计表同步 | Status changes must sync stats |
+| 9 | 统计变更验证 | Verify stats in database |
+| 10 | 禁止删除源文件 | Fix errors, don't delete files |
+| 18 | 禁止硬编码默认值 | Use user-selected values |
 | 25 | 接口签名 | Interface compatibility check |
 | 26 | BDT 流程 | 6-step bug-driven testing |
 | 27 | cherry-pick 验证 | Verify on develop after cherry-pick |
