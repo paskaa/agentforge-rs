@@ -268,6 +268,30 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - **关联表必须查完整** — 涉及 JOIN 的 SQL，必须查所有关联表的结构和外键关系
 - **数据库连接**: `db-query <schema> "<SQL>"`（schema 默认 hisdev）
 
+### 🔴 状态值一致性铁律（来自 Bug #574 教训）
+- **修改任何状态值前，必须列出完整状态流转链路**
+- **检查项**：①枚举定义值 ②Service设置值 ③查询映射 ④前端STATUS_CLASS_MAP ⑤前端v-if条件 ⑥统计SQL
+- **禁止**：只改一端不检查其他端。必须全链路对齐。
+- **全链路验证顺序**：数据库写入→后端接口映射→前端显示文本→前端按钮状态→统计数据
+
+### 🔴 禁止删除源文件铁律
+- **绝对禁止**删除项目中已有的 Java/Vue/SQL 源文件
+- 编译错误 → 修复错误，不删除文件
+- 重复文件 → 重构合并，不删除文件
+- AI 幻觉文件 → 检查 `git ls-tree baseline -- <file>` 确认后再删除
+- **唯一例外**：人类明确确认删除
+
+### 🔴 禁止修改已有公开方法签名铁律
+- 不能删除或重命名已有的 public 方法
+- 不能修改已有方法的参数列表
+- 需要新功能 → 添加重载方法
+- 需要改行为 → 修改方法内部实现
+
+### 🔴 搜索所有相关代码路径铁律
+- 修复前必须用 `rg` 搜索所有引用该状态/方法/字段的代码
+- `rg "状态枚举名|相关方法名|相关字段名" --type java --type vue`
+- 确保不遗漏任何引用路径
+
 ```
 # 数据库查询示例
 db-query hisdev "SELECT column_name, is_nullable, data_type FROM information_schema.columns WHERE table_name='表名' ORDER BY ordinal_position;"
