@@ -49,6 +49,25 @@
       禅道同步: {{ zentao.last_sync }} · 活跃: {{ zentao.active || 0 }} · 总计: {{ zentao.total || 0 }}
     </div>
 
+    <!-- 部署状态 -->
+    <el-card shadow="never" style="margin-bottom:20px">
+      <template #header>
+        <span>🚀 部署状态</span>
+      </template>
+      <el-descriptions :column="2" size="small" border>
+        <el-descriptions-item label="后端服务启动">{{ deploy.backend_start }}</el-descriptions-item>
+        <el-descriptions-item label="最新提交">{{ deploy.develop_commit_time }}</el-descriptions-item>
+        <el-descriptions-item label="最近修复">
+          <div v-for="c in deploy.recent_commits" :key="c">{{ c }}</div>
+        </el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag :type="deploy.deployed ? 'success' : 'danger'">
+            {{ deploy.deployed ? '✅ 已部署' : '❌ 未部署' }}
+          </el-tag>
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-card>
+
     <!-- 协调者 + 子智能体 -->
     <el-card shadow="never" style="margin-bottom:20px">
       <template #header>
@@ -138,6 +157,7 @@ const stats = ref({})
 const zentao = ref({})
 const agents = ref([])
 const recent = ref([])
+const deploy = ref({})
 
 const coordinator = computed(() => {
   return agents.value.find(a => a.id === 'liubei') || { id: 'liubei', name: '刘备', role: '协调者', icon: '👑', status: 'idle', rate: '0%', avg_s: '0s' }
@@ -165,6 +185,10 @@ async function fetchAll(forceRefresh = false) {
     agents.value = dash.agents || []
     recent.value = dash.recent || []
     zentao.value = zen
+    try {
+      const depRes = await fetch('/api/deploy-status')
+      deploy.value = await depRes.json()
+    } catch {}
   } catch {}
 }
 

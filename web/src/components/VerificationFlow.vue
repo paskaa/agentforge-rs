@@ -13,6 +13,8 @@
     </template>
 
     <!-- 测试生命周期时间线 -->
+    <el-alert v-if="isRejected" type="error" :title="rejectReason" show-icon style="margin-bottom:12px" />
+
     <el-timeline v-if="traces.length">
       <el-timeline-item
         v-for="(t, idx) in traces" :key="idx"
@@ -93,6 +95,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
+import { CircleCloseFilled } from '@element-plus/icons-vue'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 
 const props = defineProps({ bugId: { type: String, required: true } })
@@ -101,6 +104,25 @@ const report = ref(null)
 const traces = ref([])
 const expandedIdx = ref(null)
 const expandedCheck = ref(null)
+
+const isRejected = computed(() => {
+  return traces.value.some(t => {
+    const msg = (t.message || '') + (t.event || '')
+    return msg.includes('rejected: not on develop') || msg.includes('rejected: not deployed')
+  })
+})
+
+const rejectReason = computed(() => {
+  const rejected = traces.value.find(t => {
+    const msg = (t.message || '') + (t.event || '')
+    return msg.includes('rejected: not on develop') || msg.includes('rejected: not deployed')
+  })
+  if (!rejected) return ''
+  const msg = rejected.message || rejected.event || ''
+  if (msg.includes('not on develop')) return '❌ 代码未合入 develop 分支'
+  if (msg.includes('not deployed')) return '❌ 代码未部署到测试环境'
+  return '❌ 验证被拒绝'
+})
 
 const fetchVerification = async () => {
   if (!props.bugId) return

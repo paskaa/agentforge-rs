@@ -390,6 +390,9 @@ impl AgentExecutor {
         tokio::spawn(async move {
             tracing::info!("[{}] Codex spawn started for Bug #{}", an, bid);
 
+            // ── 🔴 铁律: 修复后检查是否有文件被删除 ──
+            // （此检查在 Codex 完成后执行，通过 traces 中的 fix_done 事件触发）
+
             // ── 自动重试逻辑：最多 MAX_FIX_RETRIES 次，指数退避 ──
             let mut r = None;
             for attempt in 0..=MAX_FIX_RETRIES {
@@ -980,6 +983,38 @@ impl AgentExecutor {
             root_cause, fix_files_list, pipeline_timeline,
             ts.chars().skip(11).take(8).collect::<String>()
         );
+
+        // ── Step 4.5: 🔴 铁律 — 检查是否有文件被删除 ──
+        {
+            let worktree = "/tmp/agentforge-worktrees/guanyu/openhis-server-new";
+            let git_diff = std::process::Command::new("git")
+                .args(["diff", "--name-status", "HEAD~1"])
+                .current_dir(worktree)
+                .output();
+            if let Ok(out) = git_diff {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let deleted: Vec<&str> = stdout.lines()
+                    .filter(|l| l.starts_with('D'))
+                    .collect();
+                if !deleted.is_empty() {
+                    tracing::warn!("[chenlin] Bug#{} 修复中删除了文件: {:?}", bid, deleted);
+                    let _ = self.feishu.send(&format!("⚠️ Bug #{} 归档警告：修复中删除了 {} 个文件！
+{}
+请检查是否应该重构而非删除", bid, deleted.len(), deleted.join("
+")), None).await;
+                    let cfg = crate::config::Config::load().ok();
+                    if let Some(cfg) = cfg {
+                        let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                        let _ = client.comment_bug(&bid, &format!(
+                            "[⚠️ 陈琳归档] Bug #{} 归档警告
+
+修复中检测到文件删除：{}
+铁律：禁止删除已有源文件，应重构修复", bid, deleted.join(", ")
+                        )).await;
+                    }
+                }
+            }
+        }
 
         // ── Step 5: Git 归档 ──
         let his_repo = "/root/.openclaw/workspace/his-repo";

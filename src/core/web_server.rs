@@ -861,6 +861,83 @@ async fn bug_reports_api(
     Json(serde_json::json!({"reports": [], "count": 0}))
 }
 
+async fn deploy_status_api() -> impl IntoResponse {
+    // 1. Get his-backend.service start time
+    let backend_start = tokio::process::Command::new("systemctl")
+        .args(["show", "his-backend.service", "--property=ActiveEnterTimestamp"])
+        .output()
+        .await
+        .map(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.strip_prefix("ActiveEnterTimestamp=")
+                .unwrap_or(&s)
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_else(|e| format!("error: {}", e));
+
+    // 2. Get latest develop branch commit time
+    let develop_commit_time = tokio::process::Command::new("git")
+        .args(["log", "origin/develop", "--format=%ai", "-1"])
+        .current_dir("/root/.openclaw/workspace/his-repo")
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("error: {}", e));
+
+    // 3. Get recent 5 commits (time + message)
+    let recent_commits_output = tokio::process::Command::new("git")
+        .args(["log", "origin/develop", "--format=%ai %s", "-5"])
+        .current_dir("/root/.openclaw/workspace/his-repo")
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("error: {}", e));
+
+    let recent_commits: Vec<&str> = recent_commits_output.lines().collect();
+
+    // 4. Determine if deployed: parse both timestamps and compare
+    let deployed = parse_timestamp(&backend_start)
+        .and_then(|backend_ts| {
+            parse_timestamp(&develop_commit_time).map(|commit_ts| backend_ts >= commit_ts)
+        })
+        .unwrap_or(false);
+
+    Json(serde_json::json!({
+        "backend_start": backend_start,
+        "develop_commit_time": develop_commit_time,
+        "recent_commits": recent_commits,
+        "deployed": deployed
+    }))
+}
+
+/// Parse a datetime string like "Tue 2025-06-02 14:30:00 CST" or "2025-06-02 14:30:00 +0800"
+/// into a unix timestamp for comparison.
+fn parse_timestamp(s: &str) -> Option<i64> {
+    use chrono::NaiveDateTime;
+    let s = s.trim();
+    // Try parsing "YYYY-MM-DD HH:MM:SS" (possibly with timezone suffix)
+    // Strip common prefixes like "Mon ", "Tue ", etc.
+    let stripped = if s.len() > 4 && s.as_bytes()[3] == b' ' {
+        &s[4..]
+    } else {
+        s
+    };
+    // Try "YYYY-MM-DD HH:MM:SS" format
+    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S") {
+        return Some(dt.and_utc().timestamp());
+    }
+    // Try "YYYY-MM-DDTHH:MM:SS" format (ISO)
+    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt.and_utc().timestamp());
+    }
+    // Try with fractional seconds "YYYY-MM-DD HH:MM:SS.ffffff"
+    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S%.f") {
+        return Some(dt.and_utc().timestamp());
+    }
+    None
+}
+
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "/root/agentforge-rs/static".into());
 
     // Start background ticker
@@ -883,6 +960,7 @@ async fn bug_reports_api(
         .route("/api/zentao/stats", get(zentao_stats_api))
         .route("/api/constraints", get(constraints_api))
         .route("/api/l5/history", get(l5_history_api))
+        .route("/api/deploy-status", get(deploy_status_api))
         .route("/api/bugs/enqueue", axum::routing::post(enqueue_bug_api))
         .route("/api/bugs/batch-enqueue", axum::routing::post(batch_enqueue_api))
         .route("/ws", get(ws_handler))
