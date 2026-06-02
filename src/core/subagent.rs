@@ -150,7 +150,14 @@ pub fn is_frontend_bug(title: &str) -> bool {
 
 /// Load a skill file's content (return empty string if not found).
 fn load_skill(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let len = content.len();
+    if len > 0 {
+        tracing::info!("[skill] Loaded {} ({} chars)", path.split('/').last().unwrap_or("?"), len);
+    } else {
+        tracing::warn!("[skill] Empty: {}", path);
+    }
+    content.chars().take(3000).collect()
 }
 
 /// Build the full harness-augmented prompt for Codex.
@@ -294,6 +301,24 @@ db-query hisdev "SELECT * FROM 表名 WHERE 条件 LIMIT 10; (验证数据)"
 
 ### 🧪 Bug-Driven Testing（先写测试再修 Bug）
 {bdt}
+
+### 🔧 AgentForge 修复技能
+{af_fix}
+
+### 🧪 AgentForge 测试技能
+{af_test}
+
+### ✅ AgentForge 验收技能
+{af_verify}
+
+### 📚 AgentForge 归档技能
+{af_archive}
+
+### 🗄️ AgentForge DB审查技能
+{af_db_review}
+
+### 🔍 AgentForge 分析技能
+{af_analyze}
 
 ## 项目规则摘要
 {agents_md_hint}
