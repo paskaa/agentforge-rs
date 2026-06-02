@@ -243,6 +243,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 - **人类提的 Bug 只加备注不改状态** — reporter 是人类账号(chenxj/yangkexiang 等)时，不改 status、不改 assignedTo，只添加备注
 - **智能体提的 Bug 可改分配和加备注** — 但状态变更必须等测试通过后由华佗确认
 - **每个修复必须有 git commit** — commit message 格式: `fix(#bug_id): 简要描述`
+- **🔴 修复完成必须提交** — 代码修改后必须执行 `git add --all && git commit && git push`，未提交的修复等于没修。框架会自动检测未提交变更并强制提交，但智能体应主动完成提交流程
 - **commit 前必须验证** — mvn compile/vue-tsc 0 error + 无新增 lint 警告
 - **🔴 修复必须合并到 develop 分支** — 工作树 commit 不等于生效！必须 git merge 或 cherry-pick 到 develop，否则修复不会部署。修复后立即执行: `cd his-repo && git merge <worktree-branch> && git push origin develop`
 - **🔴 未合并到 develop 的修复等于没修** — 华佗验收时必须检查 develop 分支上是否有该 commit，没有则拒绝验收
@@ -1253,10 +1254,20 @@ fn query_bug_details_v2(bug_id: &str) -> String {
 /// Auto-commit fix changes to the agent's worktree.
 fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str) {
     let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
-    let _ = Command::new("git")
+    let add_result = Command::new("git")
         .args(["-C", &worktree, "add", "--all", "--",
                 ":!*.orig", ":!*.mjs", ":!*.timestamp*"])
         .output();
+    match &add_result {
+        Ok(o) if !o.status.success() => {
+            tracing::error!("[{}] Bug#{} git add 失败: {}", agent_name, bug_id,
+                String::from_utf8_lossy(&o.stderr).chars().take(200).collect::<String>());
+        }
+        Err(e) => {
+            tracing::error!("[{}] Bug#{} git add 执行错误: {}", agent_name, bug_id, e);
+        }
+        _ => {}
+    }
 
     // Extract root causes and fixes for structured commit message
     let (root_causes, fixes) = extract_fix_details(stdout, bug_title);
@@ -1273,9 +1284,23 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
         commit_msg
     };
 
-    let _ = Command::new("git")
+    let commit_result = Command::new("git")
         .args(["-C", &worktree, "commit", "-m", &final_msg])
         .output();
+    match &commit_result {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            tracing::error!("[{}] Bug#{} git commit 失败: {}", agent_name, bug_id, stderr.chars().take(300).collect::<String>());
+            return; // commit 失败，不继续
+        }
+        Err(e) => {
+            tracing::error!("[{}] Bug#{} git commit 执行错误: {}", agent_name, bug_id, e);
+            return;
+        }
+        _ => {
+            tracing::info!("[{}] Bug#{} git commit 成功 ✅", agent_name, bug_id);
+        }
+    }
 
     // 铁律 #24: 修复后必须本地编译验证，禁止未编译就 push
     let branch = agent_name;
@@ -1336,7 +1361,7 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                     // 铁律: 总是尝试 cherry-pick 到 develop
                     // develop 上可能有旧的不完整修复，需要增量合并
                     // 验证会在 develop 分支上跑，确认是否真正修好
-                    tracing::info!("[{}] Bug #{} 尝试 cherry-pick 到 develop", agent_name, bug_id);
+                    tracing::info!("[{}] Bug#{} 尝试 cherry-pick 到 develop", agent_name, bug_id);
 
                     {
                         // Try cherry-pick with -X theirs to auto-resolve simple conflicts
