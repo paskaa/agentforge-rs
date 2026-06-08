@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL"],
+      "description": "修复结果: PASS 或 FAIL"
+    },
+    "reason": {
+      "type": "string",
+      "description": "失败原因 (FAIL时必填)"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "修改的文件列表"
+    },
+    "scores": {
+      "type": "object",
+      "properties": {
+        "design_quality": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "craft": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "functionality": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "style_consistency": { "type": "integer", "minimum": 1, "maximum": 5 }
+      },
+      "description": "4维评分 (仅Reviewer使用)"
+    },
+    "summary": {
+      "type": "string",
+      "description": "修复摘要"
+    }
+  },
+  "required": ["verdict"],
+  "additionalProperties": false
+}

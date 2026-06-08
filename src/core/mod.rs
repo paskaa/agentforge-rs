@@ -17,3 +17,4 @@ pub mod self_optimizer;
 
 pub mod verification;
 pub mod web_server;
+pub mod codex_exec;

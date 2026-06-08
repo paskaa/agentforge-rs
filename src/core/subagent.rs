@@ -1714,6 +1714,93 @@ pub fn fmt_duration(seconds: f64) -> String {
     }
 }
 
+
+
+/// 使用 codex exec 直接调用的修复函数 (v2)
+/// 
+/// 替代 codex-aliyun → mimo2codex → codex 管道
+/// 直接使用 Codex CLI 的非交互模式
+pub fn run_codex_fix_v2(
+    agent_name: &str,
+    bug_id: &str,
+    bug_title: &str,
+    timeout_secs: u64,
+) -> CodexResult {
+    use crate::core::codex_exec::{self, Verdict};
+    
+    let start = std::time::Instant::now();
+    
+    // Step 1: 查询 Bug 详情
+    let bug_details = query_bug_details_v2(bug_id);
+    
+    // Step 2: 构建 Harness 增强 prompt
+    let harness_prompt = build_harness_prompt(agent_name, bug_id, bug_title, &bug_details);
+    
+    // Step 3: 确定沙箱权限
+    let sandbox = if agent_name == "zhaoyun" || agent_name == "guanyu" || agent_name == "xunyu" {
+        "workspace-write"
+    } else {
+        "read-only"
+    };
+    
+    // Step 4: 执行 codex exec
+    tracing::info!("[{}] Bug#{} 开始 codex exec (sandbox={})", agent_name, bug_id, sandbox);
+    let result = codex_exec::codex_exec(
+        &harness_prompt,
+        sandbox,
+        Some("/root/agentforge-rs/schemas/verdict.json"),
+        Some(agent_name),
+        timeout_secs,
+    );
+    
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    
+    // Step 5: 处理结果
+    match &result.verdict {
+        Verdict::Pass => {
+            tracing::info!("[{}] Bug#{} VERDICT: PASS ({}ms, {} tokens)",
+                agent_name, bug_id, result.elapsed_ms, result.total_tokens);
+        }
+        Verdict::Fail(reason) => {
+            tracing::warn!("[{}] Bug#{} VERDICT: FAIL: {} ({}ms)",
+                agent_name, bug_id, reason, result.elapsed_ms);
+        }
+        Verdict::Unknown => {
+            tracing::warn!("[{}] Bug#{} VERDICT: UNKNOWN ({}ms)",
+                agent_name, bug_id, result.elapsed_ms);
+        }
+    }
+    
+    // Step 6: 统计变更文件数
+    let changes = count_changed_files(agent_name, bug_id);
+    
+    CodexResult {
+        success: result.success,
+        bug_id: bug_id.to_string(),
+        elapsed_ms,
+        stdout: result.final_message,
+        stderr: result.stderr,
+        exit_code: if result.success { 0 } else { 1 },
+        changes,
+    }
+}
+
+/// 统计变更文件数
+fn count_changed_files(agent_name: &str, bug_id: &str) -> u32 {
+    let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD~1"])
+        .current_dir(&worktree)
+        .output();
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32
+        }
+        Err(_) => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
