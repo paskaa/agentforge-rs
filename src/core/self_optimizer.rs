@@ -330,6 +330,89 @@ impl Default for SelfOptimizer {
     }
 }
 
+
+
+// ═══════════════════════════════════════════════════════════════
+// 结构化评分框架 — 4维评估体系 (Anthropic Harness Engineering)
+// ═══════════════════════════════════════════════════════════════
+
+/// 4维结构化评分
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StructuredScore {
+    /// 设计质量：模块间命名规范、错误处理模式、API设计风格是否全局统一
+    pub design_quality: u8,    // 1-5
+    /// 工艺性：边界条件覆盖、类型安全、性能热点处理、日志充分
+    pub craft: u8,             // 1-5
+    /// 功能性：功能是否按预期工作、测试是否通过、用户路径是否畅通
+    pub functionality: u8,     // 1-5
+    /// 风格一致性：与项目现有代码风格的匹配度
+    pub style_consistency: u8, // 1-5
+    /// 附加说明
+    pub notes: String,
+}
+
+impl StructuredScore {
+    pub fn total(&self) -> u32 {
+        self.design_quality as u32 + self.craft as u32 +
+        self.functionality as u32 + self.style_consistency as u32
+    }
+
+    pub fn max_total() -> u32 { 20 }
+
+    pub fn pass_threshold() -> u32 { 12 } // 60% 通过线
+
+    pub fn is_pass(&self) -> bool {
+        self.total() >= Self::pass_threshold()
+            && self.functionality >= 3 // 功能性最低要求
+    }
+
+    pub fn to_verdict(&self) -> String {
+        if self.is_pass() {
+            format!("VERDICT: PASS (总分{}/{}，设计{} 工艺{} 功能{} 风格{})",
+                self.total(), Self::max_total(),
+                self.design_quality, self.craft, self.functionality, self.style_consistency)
+        } else {
+            format!("VERDICT: FAIL (总分{}/{}，设计{} 工艺{} 功能{} 风格{})
+原因: {}",
+                self.total(), Self::max_total(),
+                self.design_quality, self.craft, self.functionality, self.style_consistency,
+                self.notes)
+        }
+    }
+}
+
+/// 从 VERDICT 输出中解析结构化评分
+pub fn parse_structured_score(output: &str) -> Option<StructuredScore> {
+    // 尝试从输出中提取评分维度
+    let extract = |label: &str| -> Option<u8> {
+        output.lines().find_map(|line| {
+            if line.contains(label) {
+                line.chars().find(|c| c.is_ascii_digit())
+                    .and_then(|c| c.to_digit(10))
+                    .map(|n| n as u8)
+            } else { None }
+        })
+    };
+
+    let design = extract("设计质量").unwrap_or(3);
+    let craft = extract("工艺性").unwrap_or(3);
+    let func = extract("功能性").unwrap_or(3);
+    let style = extract("风格一致性").unwrap_or(3);
+
+    // 只有找到明确评分才返回
+    if output.contains("设计质量") || output.contains("craft") {
+        Some(StructuredScore {
+            design_quality: design,
+            craft,
+            functionality: func,
+            style_consistency: style,
+            notes: output.lines().last().unwrap_or("").to_string(),
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

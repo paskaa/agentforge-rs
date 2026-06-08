@@ -4,6 +4,206 @@
 
 
 use redis::AsyncCommands;
+
+
+// ═══════════════════════════════════════════════════════════════
+// VERDICT 协议 — 强制二元输出，流水线自动化决策的基础
+// ═══════════════════════════════════════════════════════════════
+
+/// VERDICT 二元输出 — 将主观判断转化为机器可处理的信号
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Verdict {
+    Pass,
+    Fail(String), // 失败原因
+    Unknown,      // 未识别到 VERDICT
+}
+
+impl Verdict {
+    pub fn is_pass(&self) -> bool { matches!(self, Verdict::Pass) }
+    pub fn is_fail(&self) -> bool { matches!(self, Verdict::Fail(_)) }
+
+    pub fn to_comment(&self, agent_name: &str, bug_id: &str) -> String {
+        match self {
+            Verdict::Pass => format!("[🤖 {}] Bug #{} VERDICT: PASS", agent_name, bug_id),
+            Verdict::Fail(reason) => format!("[🤖 {}] Bug #{} VERDICT: FAIL
+原因: {}", agent_name, bug_id, reason),
+            Verdict::Unknown => format!("[🤖 {}] Bug #{} VERDICT: UNKNOWN", agent_name, bug_id),
+        }
+    }
+}
+
+/// 从输出中解析 VERDICT
+pub fn parse_verdict(output: &str) -> Verdict {
+    // 优先匹配 "VERDICT: PASS" 或 "VERDICT: FAIL"
+    for line in output.lines() {
+        let line = line.trim();
+        if line.contains("VERDICT:") || line.contains("VERDICT：") {
+            if line.contains("PASS") || line.contains("通过") {
+                return Verdict::Pass;
+            }
+            if line.contains("FAIL") || line.contains("失败") {
+                // 提取失败原因：VERDICT: FAIL [原因] 或 VERDICT：失败 [原因]
+                let reason = line
+                    .split(&['：', ':'][..])
+                    .nth(1)
+                    .map(|s| {
+                        s.trim()
+                            .trim_start_matches("FAIL")
+                            .trim_start_matches("失败")
+                            .trim_start_matches(&['[', '（', '('][..])
+                            .trim_end_matches(&[']', '）', ')'][..])
+                            .trim()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "未提供原因".to_string());
+                return Verdict::Fail(reason);
+            }
+        }
+    }
+    Verdict::Unknown
+}
+
+/// 轮次预算配置
+pub struct RoundBudget {
+    pub max_fix_rounds: u32,
+    pub max_test_rounds: u32,
+    pub max_verify_rounds: u32,
+    pub max_total_rounds: u32,
+}
+
+impl Default for RoundBudget {
+    fn default() -> Self {
+        Self {
+            max_fix_rounds: 3,
+            max_test_rounds: 3,
+            max_verify_rounds: 2,
+            max_total_rounds: 8,
+        }
+    }
+}
+
+/// 检查轮次预算
+pub async fn check_round_budget(
+    bug_id: &str,
+    agent: &str,
+    redis: &mut redis::aio::MultiplexedConnection,
+    budget: &RoundBudget,
+) -> Result<bool, String> {
+    let key = format!("round_budget:{}:{}", bug_id, agent);
+    let count: i32 = redis.clone().get(&key).await.unwrap_or(0);
+    let max = match agent {
+        "guanyu" | "zhaoyun" | "xunyu" => budget.max_fix_rounds,
+        "zhangfei" => budget.max_test_rounds,
+        "huatuo" => budget.max_verify_rounds,
+        _ => budget.max_total_rounds,
+    };
+    Ok(count >= max as i32)
+}
+
+/// 增加轮次计数
+pub async fn increment_round(
+    bug_id: &str,
+    agent: &str,
+    redis: &mut redis::aio::MultiplexedConnection,
+) {
+    let key = format!("round_budget:{}:{}", bug_id, agent);
+    let _: redis::RedisResult<i32> = redis.clone().incr(&key, 1).await;
+    // 设置 TTL 为 7 天
+    let _: redis::RedisResult<()> = redis.clone().expire(&key, 604800).await;
+}
+
+/// 文件快照 Diff
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileDiff {
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+}
+
+impl FileDiff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+    }
+
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.added.is_empty() { parts.push(format!("新增{}个", self.added.len())); }
+        if !self.modified.is_empty() { parts.push(format!("修改{}个", self.modified.len())); }
+        if !self.deleted.is_empty() { parts.push(format!("删除{}个", self.deleted.len())); }
+        if parts.is_empty() { "无变更".to_string() } else { parts.join(", ") }
+    }
+
+    pub fn detail(&self) -> String {
+        let mut lines = Vec::new();
+        for f in &self.added { lines.push(format!("  + {}", f)); }
+        for f in &self.modified { lines.push(format!("  ~ {}", f)); }
+        for f in &self.deleted { lines.push(format!("  - {}", f)); }
+        lines.join("\n")
+    }
+}
+
+/// 捕获项目目录快照（文件路径 → size + mtime）
+fn capture_snapshot(project_dir: &str) -> std::collections::HashMap<String, (u64, String)> {
+    let mut snapshot = std::collections::HashMap::new();
+    let output = std::process::Command::new("find")
+        .args([project_dir, "-type", "f", "-name", "*.java", "-o", "-name", "*.vue", "-o", "-name", "*.ts", "-o", "-name", "*.js", "-o", "-name", "*.sql", "-o", "-name", "*.xml"])
+        .output();
+    if let Ok(out) = output {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let path = line.trim().to_string();
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let size = meta.len();
+                let mtime = format!("{:?}", meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+                snapshot.insert(path, (size, mtime));
+            }
+        }
+    }
+    snapshot
+}
+
+/// 计算两个快照的差异
+pub fn compute_diff(before: &std::collections::HashMap<String, (u64, String)>,
+                     after: &std::collections::HashMap<String, (u64, String)>) -> FileDiff {
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+
+    for (path, _) in after {
+        if !before.contains_key(path) {
+            added.push(path.clone());
+        } else if before[path] != after[path] {
+            modified.push(path.clone());
+        }
+    }
+    for (path, _) in before {
+        if !after.contains_key(path) {
+            deleted.push(path.clone());
+        }
+    }
+
+    // 只保留 src/ 下的文件，过滤掉 target/ node_modules/ 等
+    let filter = |p: &mut Vec<String>| {
+        p.retain(|f| f.contains("/src/") || f.contains("/src\\"));
+        p.sort();
+    };
+    filter(&mut added);
+    filter(&mut modified);
+    filter(&mut deleted);
+
+    FileDiff { added, modified, deleted }
+}
+
+/// 在项目目录前后拍摄快照并计算差异
+pub fn snapshot_and_diff(project_dir: &str, before: &std::collections::HashMap<String, (u64, String)>) -> FileDiff {
+    let after = capture_snapshot(project_dir);
+    compute_diff(before, &after)
+}
+
+/// 拍摄快照（供外部调用）
+pub fn take_snapshot(project_dir: &str) -> std::collections::HashMap<String, (u64, String)> {
+    capture_snapshot(project_dir)
+}
+
 /// Known human accounts — their bugs get fixed but status/assignment unchanged.
 pub const HUMAN_ACCOUNTS: &[&str] = &[
     "chenxj", "sjjh", "admin", "doctor1", "ssshs1",
@@ -174,6 +374,132 @@ pub async fn should_skip_bug(
     (false, String::new())
 }
 
+
+
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 3: 上下文交接优化 — 结构化交接卡
+// ═══════════════════════════════════════════════════════════════
+
+/// 结构化交接卡 — Agent 之间传递完整上下文
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HandoffCard {
+    pub bug_id: String,
+    pub bug_title: String,
+    pub reporter: String,
+    pub from_agent: String,
+    pub to_agent: String,
+    pub stage: String,              // "fix" | "db_review" | "test" | "verify" | "archive"
+    pub file_diff: Option<FileDiff>,
+    pub verification_summary: Option<String>,
+    pub previous_rounds: u32,
+    pub context_summary: String,
+    pub timestamp: String,
+}
+
+impl HandoffCard {
+    pub fn new(bug_id: &str, bug_title: &str, reporter: &str, from: &str, to: &str, stage: &str) -> Self {
+        Self {
+            bug_id: bug_id.to_string(),
+            bug_title: bug_title.to_string(),
+            reporter: reporter.to_string(),
+            from_agent: from.to_string(),
+            to_agent: to.to_string(),
+            stage: stage.to_string(),
+            file_diff: None,
+            verification_summary: None,
+            previous_rounds: 0,
+            context_summary: String::new(),
+            timestamp: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        }
+    }
+
+    pub fn to_message(&self) -> String {
+        let mut msg = format!(
+            "📋 交接卡: Bug #{} ({})
+来源: {} → {}
+阶段: {}
+提出人: {}",
+            self.bug_id, self.bug_title, self.from_agent, self.to_agent, self.stage, self.reporter
+        );
+        if let Some(diff) = &self.file_diff {
+            if !diff.is_empty() {
+                msg.push_str(&format!("
+文件变更: {}", diff.summary()));
+                msg.push_str(&format!("
+{}", diff.detail()));
+            }
+        }
+        if let Some(summary) = &self.verification_summary {
+            msg.push_str(&format!("
+验证结果: {}", summary));
+        }
+        if self.previous_rounds > 0 {
+            msg.push_str(&format!("
+已执行轮次: {}", self.previous_rounds));
+        }
+        if !self.context_summary.is_empty() {
+            msg.push_str(&format!("
+上下文: {}", self.context_summary));
+        }
+        msg
+    }
+
+    /// 从 Redis 获取交接卡
+    pub async fn load(bug_id: &str, redis: &mut redis::aio::MultiplexedConnection) -> Option<Self> {
+        let key = format!("handoff:{}", bug_id);
+        let json: String = redis.clone().get(&key).await.ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    /// 保存交接卡到 Redis (TTL 24小时)
+    pub async fn save(&self, redis: &mut redis::aio::MultiplexedConnection) {
+        let key = format!("handoff:{}", self.bug_id);
+        if let Ok(json) = serde_json::to_string(self) {
+            let _: redis::RedisResult<()> = redis.clone().set_ex(&key, &json, 86400).await;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 3: 实时可观测性增强 — 流式事件
+// ═══════════════════════════════════════════════════════════════
+
+/// 流式事件类型 — 用于 WebSocket 实时推送
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum PipelineEvent {
+    #[serde(rename = "agent_start")]
+    AgentStart { agent_id: String, bug_id: String, stage: String },
+    
+    #[serde(rename = "agent_end")]
+    AgentEnd { agent_id: String, bug_id: String, verdict: String, duration_ms: u64 },
+    
+    #[serde(rename = "file_changed")]
+    FileChanged { bug_id: String, path: String, change_type: String },
+    
+    #[serde(rename = "budget_update")]
+    BudgetUpdate { bug_id: String, agent: String, current: u32, max: u32 },
+    
+    #[serde(rename = "degradation")]
+    Degradation { bug_id: String, level: String, reason: String },
+    
+    #[serde(rename = "handoff")]
+    Handoff { bug_id: String, from: String, to: String, stage: String },
+    
+    #[serde(rename = "pipeline_complete")]
+    PipelineComplete { bug_id: String, total_duration_ms: u64, stages: Vec<String> },
+}
+
+impl PipelineEvent {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    pub fn timestamp(&self) -> String {
+        chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+    }
+}
 
 #[cfg(test)]
 mod tests {
