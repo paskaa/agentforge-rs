@@ -112,13 +112,13 @@ impl AgentExecutor {
 
 
             // For fixers: check per-agent lock BEFORE consuming — avoid task loss
-            // Also auto-release stale locks (TTL < 3300 = held >15min)
+            // Also auto-release stale locks (TTL < 82800 = held >1h)
             if self.is_fixer {
                 let my_lock = format!("codex_lock:{}", self.agent_id);
                 let ttl: i64 = self.redis.clone().ttl(&my_lock).await.unwrap_or(-2);
                 if ttl == -2 { /* key doesn't exist — no lock */ }
-                else if ttl > 0 && ttl < 1800 {
-                    // Lock held >45min (3600-900=2700s) — probably stale, release
+                else if ttl > 0 && ttl < 82800 {
+                    // Lock held >1h (86400-3600=82800s) — probably stale, release
                     tracing::warn!("[{}] Stale lock detected (TTL={}s), auto-releasing", self.agent_id, ttl);
                     let _: redis::RedisResult<()> = self.redis.clone().del(&my_lock).await;
                 } else {
@@ -147,7 +147,7 @@ impl AgentExecutor {
                 "pipeline_analyze" if self.agent_id == "zhugeliang" => self.handle_pipeline_analyze(msg).await,
                 "pipeline_db_review" if self.agent_id == "xunyu" => self.handle_pipeline_db_review(msg).await,
                 "pipeline_report" if self.agent_id == "liubei" => self.handle_pipeline_report(msg).await,
-                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" | "verify_retry" | "web_ui" => self.handle_fix_task(msg).await,
+                "pm_routed" | "coordinator_scan" | "hermes_action" | "hermes_assign" | "pipeline" | "pipeline_batch" | "verify_retry" | "web_ui" | "web_execute" => self.handle_fix_task(msg).await,
                 "pipeline_fix_done" if self.agent_id == "zhangfei" => self.handle_pipeline_test(msg).await,
                 "pipeline_test_done" if self.agent_id == "huatuo" => self.handle_pipeline_verify(msg).await,
                 "pipeline_test_done" if self.agent_id == "chenlin" => self.handle_chenlin_doc(msg).await,
@@ -360,7 +360,7 @@ impl AgentExecutor {
             return;
         }
         // 设置活跃标记（TTL 30 分钟）
-        let _: redis::RedisResult<()> = self.redis.clone().set_ex(&dedup_key, "1", 1800).await;
+        let _: redis::RedisResult<()> = self.redis.clone().set_ex(&dedup_key, "1", 86400).await;
         // ── 文件快照：记录修复前状态 ──
         let project_dir = if self.agent_id == "zhaoyun" {
             "/root/.openclaw/workspace/his-repo/healthlink-his-ui"
@@ -370,7 +370,7 @@ impl AgentExecutor {
         let before_snapshot = take_snapshot(project_dir);
         let snapshot_key = format!("file_snapshot:{}:{}", self.agent_id, bug_id);
         if let Ok(snapshot_json) = serde_json::to_string(&before_snapshot) {
-            let _: redis::RedisResult<()> = self.redis.clone().set_ex(&snapshot_key, &snapshot_json, 3600).await;
+            let _: redis::RedisResult<()> = self.redis.clone().set_ex(&snapshot_key, &snapshot_json, 86400).await;
         }
 
         self.traces.log(&self.agent_id, "fix_start", Some(&format!("Bug#{}", bug_id)), Some(msg), Some("codex"), None, None, Some("pending"), None).await;
@@ -381,7 +381,7 @@ impl AgentExecutor {
         let lk = lock_key.clone();
         let acquired = tokio::task::spawn_blocking(move || {
             if let Ok(mut conn) = lock_sync.lock() {
-                redis::cmd("SET").arg(&lk).arg(&agent).arg("NX").arg("EX").arg(3600)
+                redis::cmd("SET").arg(&lk).arg(&agent).arg("NX").arg("EX").arg(86400)
                     .query::<Option<String>>(&mut *conn).ok().flatten().is_some()
             } else { false }
         }).await.unwrap_or(false);
@@ -426,7 +426,7 @@ impl AgentExecutor {
 
                 let attempt_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     tokio::task::block_in_place(|| {
-                        subagent::run_codex_fix(&an, &bid, &m, "/root/.openclaw/extensions/zentao-token-refresh/claude-code-fix.sh", 10800)
+                        subagent::run_codex_fix_v2(&an, &bid, &m, 10800)
                     })
                 })) {
                     Ok(r) => r,
@@ -439,6 +439,7 @@ impl AgentExecutor {
                             success: false, bug_id: bid.clone(), elapsed_ms: 0,
                             stdout: String::new(), stderr: format!("panic: {}", msg),
                             exit_code: -1, changes: 0,
+                            last_phase: "generator".to_string(), phase_verdicts: vec![],
                         }
                     }
                 };
@@ -465,6 +466,7 @@ impl AgentExecutor {
                 success: false, bug_id: bid.clone(), elapsed_ms: 0,
                 stdout: String::new(), stderr: "all retries exhausted".into(),
                 exit_code: -1, changes: 0,
+                last_phase: "generator".to_string(), phase_verdicts: vec![],
             });
 
             // ── 文件快照 Diff：计算修复变更 ──
@@ -483,7 +485,8 @@ impl AgentExecutor {
             let diff_summary = file_diff.summary();
             let diff_detail = file_diff.detail();
             tracing::info!("[{}] Fix #{}: ok={} changes={} file_diff={} time={}ms", an, bid, r.success, r.changes, diff_summary, r.elapsed_ms);
-            let fix_msg = format!("{} | 文件变更: {}", r.stdout.chars().take(200).collect::<String>(), diff_summary);
+            let phase_summary = r.phase_verdicts.iter().map(|(p,v)| format!("{}:{}", p, v)).collect::<Vec<_>>().join(" ");
+            let fix_msg = format!("{} | 文件变更: {} | 阶段: {}", r.stdout.chars().take(200).collect::<String>(), diff_summary, phase_summary);
             tr.log(&an, "fix_done", Some(&format!("Bug#{}", bid)), Some(&fix_msg), Some("codex"), None, Some(r.elapsed_ms as i64), Some(if r.success {"ok"} else {"failed"}), None).await;
             // Publish to Redis for WebSocket real-time
             {
@@ -620,6 +623,8 @@ impl AgentExecutor {
                 "success": r.success,
                 "elapsed_ms": r.elapsed_ms,
                 "changes": r.changes,
+                "last_phase": r.last_phase,
+                "phase_verdicts": r.phase_verdicts.iter().map(|(p,v)| serde_json::json!({"phase": p, "verdict": v})).collect::<Vec<_>>(),
                 "error": if r.success { String::new() } else { r.stderr.chars().take(200).collect::<String>() },
             });
             let _: redis::RedisResult<()> = redis_clone.set_ex(

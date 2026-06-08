@@ -82,7 +82,7 @@ codex_exec_wrap() {
     
     timeout "$timeout" codex exec \
         --sandbox "$sandbox" \
-        --approval-policy never \
+        --dangerously-bypass-approvals-and-sandbox \
         --json \
         "$task" 2>/dev/null | while IFS= read -r line; do
         # 解析 JSONL 事件

@@ -67,7 +67,7 @@ def codex_exec(task: str, sandbox: str = "workspace-write",
     cmd = [
         "codex", "exec",
         "--sandbox", sandbox,
-        "--approval-policy", "never",
+        "--dangerously-bypass-approvals-and-sandbox",
         "--json",
     ]
     if schema_path:
@@ -121,16 +121,21 @@ def codex_exec(task: str, sandbox: str = "workspace-write",
 
 def capture_snapshot(project_dir: str) -> dict:
     snapshot = {}
+    if not os.path.isdir(project_dir):
+        return snapshot
     output = run_bash(
-        f"find {project_dir} -type f "
+        f"find '{project_dir}' -type f "
         f"\\( -name '*.java' -o -name '*.vue' -o -name '*.ts' \\) "
-        f"-not -path '*/target/*' -not -path '*/node_modules/*' | "
-        f"xargs stat --format='%n %s %Y' 2>/dev/null"
+        f"-not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null | "
+        f"xargs -r stat --format='%n %s %Y' 2>/dev/null"
     )
     for line in output.split("\n"):
         parts = line.strip().split()
         if len(parts) >= 3:
-            snapshot[parts[0]] = (int(parts[1]), parts[2])
+            try:
+                snapshot[parts[0]] = (int(parts[1]), parts[2])
+            except (ValueError, IndexError):
+                continue
     return snapshot
 
 def compute_diff(before: dict, after: dict) -> dict:

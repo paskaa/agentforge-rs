@@ -45,6 +45,64 @@
       </el-col>
     </el-row>
 
+    <!-- 🤖 Harness Loop 输入框 -->
+    <el-card shadow="never" style="margin-bottom:20px;border:1px solid #3b82f6">
+      <template #header>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span>🤖 自主执行</span>
+          <el-tag type="success" size="small" effect="dark" v-if="executing">🔄 执行中</el-tag>
+          <el-tag type="info" size="small" v-else>就绪</el-tag>
+        </div>
+      </template>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <el-input
+          v-model="execCommand"
+          placeholder="输入指令，如：修复 Bug #704、扫描所有活跃Bug、修复前端下拉无数据问题"
+          size="large"
+          style="flex:1"
+          :disabled="executing"
+          @keyup.enter="submitCommand"
+        >
+          <template #prefix>
+            <span style="font-size:18px">⚡</span>
+          </template>
+        </el-input>
+        <el-button
+          type="primary"
+          size="large"
+          :loading="executing"
+          :disabled="!execCommand.trim()"
+          @click="submitCommand"
+        >
+          {{ executing ? '执行中...' : '🚀 执行' }}
+        </el-button>
+      </div>
+      <!-- 执行进度面板 -->
+      <div v-if="execResult" style="margin-top:16px;background:#0f172a;border-radius:8px;padding:16px;font-family:monospace">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          <span style="font-size:14px;font-weight:700">📋 执行进度</span>
+          <el-tag :type="execResult.ok ? 'success' : 'danger'" size="small">
+            {{ execResult.ok ? '✅ 已派发' : '❌ 失败' }}
+          </el-tag>
+        </div>
+        <div v-if="execResult.ok" style="font-size:13px;color:#94a3b8;line-height:1.8">
+          <div>🎯 目标 Agent: <span style="color:#60a5fa;font-weight:700">{{ execResult.agent }}</span></div>
+          <div>📝 任务: <span style="color:#e2e8f0">{{ execResult.message }}</span></div>
+          <div>🆔 Task ID: <span style="color:#60a5fa">{{ execResult.task_id }}</span></div>
+        </div>
+        <div v-else style="color:#ef4444;font-size:13px">{{ execResult.error }}</div>
+        <!-- 实时 trace 事件 -->
+        <div v-if="execTraces.length > 0" style="margin-top:12px;border-top:1px solid #1e293b;padding-top:12px">
+          <div style="font-size:12px;color:#64748b;margin-bottom:8px">📡 实时事件:</div>
+          <div v-for="(t, i) in execTraces" :key="i" style="font-size:12px;line-height:1.6;color:#94a3b8">
+            <span style="color:#475569">{{ t.time }}</span>
+            <span :style="{color: t.status === 'ok' ? '#22c55e' : t.status === 'failed' ? '#ef4444' : '#f59e0b', fontWeight: 600}"> [{{ t.event }}]</span>
+            <span style="color:#e2e8f0"> {{ t.message }}</span>
+          </div>
+        </div>
+      </div>
+    </el-card>
+
     <div style="text-align:right;font-size:11px;color:#475569;margin:-12px 0 16px" v-if="zentao.last_sync">
       禅道同步: {{ zentao.last_sync }} · 活跃: {{ zentao.active || 0 }} · 总计: {{ zentao.total || 0 }}
     </div>
@@ -227,6 +285,58 @@ async function showDetail(row) {
     detailData.value = { ...row, zentaoBug: (zenData.bugs || []).find(b => String(b.id) === String(bugId)) || null }
   } catch {}
   detailLoading.value = false
+}
+
+
+const execCommand = ref('')
+const executing = ref(false)
+const execResult = ref(null)
+const execTraces = ref([])
+let execWs = null
+
+async function submitCommand() {
+  if (!execCommand.value.trim() || executing.value) return
+  executing.value = true
+  execResult.value = null
+  execTraces.value = []
+  try {
+    const res = await fetch('/api/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: execCommand.value }),
+    })
+    execResult.value = await res.json()
+    if (execResult.value.ok) {
+      listenExecProgress(execResult.value.task_id, execResult.value.agent)
+    }
+  } catch (e) {
+    execResult.value = { ok: false, error: String(e) }
+  }
+  executing.value = false
+}
+
+function listenExecProgress(taskId, agentId) {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  execWs = new WebSocket(`${proto}://${location.host}/ws`)
+  execWs.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      if (msg.event === 'trace' && msg.data?.agent_id === agentId) {
+        const d = msg.data
+        execTraces.value.unshift({
+          time: d.ts ? d.ts.substring(11, 19) : new Date().toLocaleTimeString(),
+          event: d.event || '?',
+          status: d.status || '',
+          message: (d.message || '').substring(0, 120),
+        })
+        if (execTraces.value.length > 30) execTraces.value.pop()
+        // 完成后关闭 ws
+        if (['fix_done', 'verify_done'].includes(d.event)) {
+          setTimeout(() => { execWs?.close(); execWs = null }, 3000)
+        }
+      }
+    } catch {}
+  }
 }
 
 onUnmounted(() => clearInterval(pollTimer))

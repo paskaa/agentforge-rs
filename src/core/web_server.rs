@@ -661,6 +661,115 @@ async fn l5_history_api() -> impl IntoResponse {
     Json(serde_json::json!({"history": entries}))
 }
 
+/// POST /api/execute — 自主 Harness Loop 入口
+async fn execute_api(
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let command = payload.get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim().to_string();
+
+    if command.is_empty() {
+        return Json(serde_json::json!({"ok": false, "error": "command 不能为空"}));
+    }
+
+    // 提取 Bug ID: "Bug #704" / "#704" / "bug704"
+    let bug_id: Option<String> = {
+        let lower = command.to_lowercase();
+        let chars: Vec<char> = command.chars().collect();
+        let mut found = None;
+        // Find "bug" keyword then digits
+        if let Some(pos) = lower.find("bug") {
+            let after = &command[pos+3..];
+            let after = after.trim_start_matches(|c: char| c == '#' || c == ' ' || c == '：' || c == ':');
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.len() >= 2 { found = Some(digits); }
+        }
+        if found.is_none() {
+            // Find standalone "#NNN"
+            for (i, ch) in chars.iter().enumerate() {
+                if *ch == '#' {
+                    let digits: String = chars[i+1..].iter().take_while(|c| c.is_ascii_digit()).collect();
+                    if digits.len() >= 2 { found = Some(digits); break; }
+                }
+            }
+        }
+        found
+    };
+
+    let agent_ids = ["guanyu", "zhaoyun", "xunyu", "zhangfei", "huatuo", "chenlin", "liubei", "zhugeliang"];
+
+    let (target_agent, message, source) = if let Some(ref bid) = bug_id {
+        let routed = route_by_keywords(&command);
+        let best = find_least_queued(routed, &agent_ids);
+        (best, format!("请修复 Bug #{}：{}", bid, command), "web_execute".to_string())
+    } else {
+        ("liubei".to_string(), command.clone(), "web_execute".to_string())
+    };
+
+    let task_id = format!("exec-{}-{}", chrono::Local::now().timestamp_millis(), &target_agent[..std::cmp::min(2, target_agent.len())]);
+    let queue = format!("agent-work-queue:fix:{}", target_agent);
+
+    let task = serde_json::json!({
+        "agent_id": target_agent,
+        "message": message,
+        "source": source,
+        "sender_id": "web_admin",
+        "chat_id": "",
+        "is_dm": "true",
+        "msg_id": task_id,
+        "timestamp": chrono::Local::now().to_rfc3339(),
+    });
+
+    let out = std::process::Command::new("redis-cli")
+        .args(["-p", "16379", "rpush", &queue, &task.to_string()])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("error: {}", e));
+
+    if out.parse::<i64>().unwrap_or(0) > 0 {
+        Json(serde_json::json!({
+            "ok": true,
+            "task_id": task_id,
+            "agent": target_agent,
+            "queue": queue,
+            "message": message,
+        }))
+    } else {
+        Json(serde_json::json!({"ok": false, "error": format!("redis error: {}", out)}))
+    }
+}
+
+fn route_by_keywords(cmd: &str) -> &'static str {
+    let lower = cmd.to_lowercase();
+    if lower.contains("前端") || lower.contains("vue") || lower.contains("ui") || lower.contains("页面") || lower.contains("弹窗") || lower.contains("下拉") || lower.contains("列表") {
+        "zhaoyun"
+    } else if lower.contains("数据库") || lower.contains("sql") || lower.contains("db") || lower.contains("mapper") {
+        "xunyu"
+    } else if lower.contains("测试") || lower.contains("test") || lower.contains("playwright") {
+        "zhangfei"
+    } else if lower.contains("后端") || lower.contains("接口") || lower.contains("api") || lower.contains("service") || lower.contains("controller") {
+        "guanyu"
+    } else {
+        "guanyu"
+    }
+}
+
+fn find_least_queued(preferred: &str, all: &[&str]) -> String {
+    let mut best = preferred.to_string();
+    let mut min_len = i64::MAX;
+    for id in all {
+        let queue = format!("agent-work-queue:fix:{}", id);
+        let len = redis_queue_len(&queue);
+        if len < min_len {
+            min_len = len;
+            best = id.to_string();
+        }
+    }
+    best
+}
+
 async fn enqueue_bug_api(
     State(s): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
@@ -961,6 +1070,7 @@ fn parse_timestamp(s: &str) -> Option<i64> {
         .route("/api/constraints", get(constraints_api))
         .route("/api/l5/history", get(l5_history_api))
         .route("/api/deploy-status", get(deploy_status_api))
+        .route("/api/execute", axum::routing::post(execute_api))
         .route("/api/bugs/enqueue", axum::routing::post(enqueue_bug_api))
         .route("/api/bugs/batch-enqueue", axum::routing::post(batch_enqueue_api))
         .route("/ws", get(ws_handler))

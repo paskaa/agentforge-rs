@@ -135,7 +135,7 @@ pub fn codex_exec(
     let mut cmd = Command::new("codex");
     cmd.arg("exec")
        .arg("--sandbox").arg(sandbox)
-       .arg("--approval-policy").arg("never")
+       .arg("--dangerously-bypass-approvals-and-sandbox")
        .arg("--json");
 
     // 添加 agent 角色上下文

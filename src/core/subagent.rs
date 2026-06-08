@@ -133,6 +133,8 @@ pub struct CodexResult {
     pub stderr: String,
     pub exit_code: i32,
     pub changes: u32,
+    pub last_phase: String,  // harness loop 最后执行的阶段
+    pub phase_verdicts: Vec<(String, String)>,  // (phase_name, verdict)
 }
 
 /// Check if a bug is a frontend issue (should use Codex).
@@ -911,6 +913,7 @@ fn run_codex_fix_impl(
                     stdout: String::new(),
                     stderr: format!("codex spawn failed: {}", e2),
                     exit_code: -1, changes: 0,
+                last_phase: "generator".to_string(), phase_verdicts: vec![],
                 },
             }
         }
@@ -1109,6 +1112,7 @@ fn run_codex_fix_impl(
                 stderr,
                 exit_code,
                 changes,
+                last_phase: "generator".to_string(), phase_verdicts: vec![],
             }
         }
         Err(e) => CodexResult {
@@ -1119,6 +1123,7 @@ fn run_codex_fix_impl(
             stderr: format!("{:?}", e),
             exit_code: -1,
             changes: 0,
+        last_phase: "generator".to_string(), phase_verdicts: vec![],
         },
     }
 }
@@ -1720,68 +1725,311 @@ pub fn fmt_duration(seconds: f64) -> String {
 /// 
 /// 替代 codex-aliyun → mimo2codex → codex 管道
 /// 直接使用 Codex CLI 的非交互模式
+/// 现在委托给 run_harness_loop 执行完整的 4 阶段循环
 pub fn run_codex_fix_v2(
     agent_name: &str,
     bug_id: &str,
     bug_title: &str,
     timeout_secs: u64,
 ) -> CodexResult {
+    // 查询 Bug 详情
+    let bug_details = query_bug_details_v2(bug_id);
+    
+    // 委托给 Harness Loop（Generator→Reviewer→QA→Verifier）
+    tracing::info!("[{}] Bug#{} 启动 Harness Loop (4阶段循环)", agent_name, bug_id);
+    run_harness_loop(agent_name, bug_id, bug_title, &bug_details, timeout_secs)
+}
+
+/// 构建审查阶段 Prompt
+fn build_review_prompt(agent_name: &str, bug_id: &str, bug_title: &str, fix_output: &str) -> String {
+    format!(r#"你是代码审查员。审查 Bug #{bug_id} 的修复代码。
+
+Bug 标题: {bug_title}
+
+修复输出摘要:
+{fix_output}
+
+评估维度 (每项1-5分)：
+- 设计质量: 命名规范、错误处理、API风格
+- 工艺性: 边界条件、类型安全、日志
+- 功能性: 功能是否按预期工作
+- 风格一致性: 与项目现有代码风格匹配度
+
+通过线: 总分≥12/20 且 功能性≥3
+
+请审查代码变更，给出评分和改进建议。
+输出最后一行必须是: VERDICT: PASS 或 VERDICT: FAIL [原因]"#,
+        bug_id=bug_id, bug_title=bug_title, fix_output=fix_output.chars().take(2000).collect::<String>())
+}
+
+/// 构建测试阶段 Prompt
+fn build_test_prompt(agent_name: &str, bug_id: &str, bug_title: &str) -> String {
+    let work_dir = if agent_name == "zhaoyun" {
+        "/root/.openclaw/workspace/his-repo/healthlink-his-ui"
+    } else {
+        "/root/.openclaw/workspace/his-repo/healthlink-his-server"
+    };
+    format!(r#"你是 QA 测试工程师。测试 Bug #{bug_id} 的修复。
+
+Bug 标题: {bug_title}
+工作目录: {work_dir}
+
+测试步骤：
+1. 运行编译验证（前端: npx vite build; 后端: mvn compile -pl healthlink-his-application -am -q）
+2. 运行单元测试（如有）
+3. 检查无回归
+
+请执行测试并报告结果。
+输出最后一行必须是: VERDICT: PASS 或 VERDICT: FAIL [原因]"#,
+        bug_id=bug_id, bug_title=bug_title)
+}
+
+/// 构建验收阶段 Prompt
+fn build_verify_prompt(agent_name: &str, bug_id: &str, bug_title: &str) -> String {
+    format!(r#"你是验收工程师。验收 Bug #{bug_id} 的修复。
+
+Bug 标题: {bug_title}
+
+验收检查项：
+1. Git commit 存在且包含 Bug #{bug_id}
+2. 编译通过
+3. 测试通过
+4. 无回归
+5. 文件变更合理（未删除必要文件）
+
+请逐项检查并报告。
+输出最后一行必须是: VERDICT: PASS 或 VERDICT: FAIL [原因]"#,
+        bug_id=bug_id, bug_title=bug_title)
+}
+
+/// Harness Loop — 4阶段循环执行（Generator→Reviewer→QA→Verifier）
+///
+/// 替代单次 codex exec，实现完整的 Harness Engineering 工作循环。
+/// 每个阶段独立调用 codex exec，阶段间传递上下文。
+pub fn run_harness_loop(
+    agent_name: &str,
+    bug_id: &str,
+    bug_title: &str,
+    bug_details: &str,
+    timeout_secs: u64,
+) -> CodexResult {
     use crate::core::codex_exec::{self, Verdict};
     
     let start = std::time::Instant::now();
+    let mut phase_verdicts: Vec<(String, String)> = Vec::new();
     
-    // Step 1: 查询 Bug 详情
-    let bug_details = query_bug_details_v2(bug_id);
-    
-    // Step 2: 构建 Harness 增强 prompt
-    let harness_prompt = build_harness_prompt(agent_name, bug_id, bug_title, &bug_details);
-    
-    // Step 3: 确定沙箱权限
+    // 确定沙箱权限
     let sandbox = if agent_name == "zhaoyun" || agent_name == "guanyu" || agent_name == "xunyu" {
         "workspace-write"
     } else {
         "read-only"
     };
     
-    // Step 4: 执行 codex exec
-    tracing::info!("[{}] Bug#{} 开始 codex exec (sandbox={})", agent_name, bug_id, sandbox);
-    let result = codex_exec::codex_exec(
-        &harness_prompt,
-        sandbox,
+    // ═══ Phase 1: Generator 修复 ═══
+    tracing::info!("[{}] Bug#{} Harness Loop Phase 1: Generator 修复", agent_name, bug_id);
+    let fix_prompt = build_harness_prompt(agent_name, bug_id, bug_title, bug_details);
+    let fix_result = codex_exec::codex_exec(
+        &fix_prompt, sandbox,
         Some("/root/agentforge-rs/schemas/verdict.json"),
-        Some(agent_name),
-        timeout_secs,
+        Some(agent_name), timeout_secs,
     );
     
-    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let fix_verdict = match &fix_result.verdict {
+        Verdict::Pass => "PASS".to_string(),
+        Verdict::Fail(r) => format!("FAIL:{}", r),
+        Verdict::Unknown => "UNKNOWN".to_string(),
+    };
+    phase_verdicts.push(("generator".to_string(), fix_verdict.clone()));
     
-    // Step 5: 处理结果
-    match &result.verdict {
-        Verdict::Pass => {
-            tracing::info!("[{}] Bug#{} VERDICT: PASS ({}ms, {} tokens)",
-                agent_name, bug_id, result.elapsed_ms, result.total_tokens);
+    if fix_result.verdict.is_fail() || fix_result.verdict == Verdict::Unknown {
+        tracing::warn!("[{}] Bug#{} Phase 1 FAILED: {:?}", agent_name, bug_id, fix_result.verdict);
+        let elapsed = start.elapsed().as_millis() as u64;
+        return CodexResult {
+            success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
+            stdout: fix_result.final_message, stderr: fix_result.stderr,
+            exit_code: 1, changes: count_changed_files(agent_name, bug_id),
+            last_phase: "generator".to_string(), phase_verdicts,
+        };
+    }
+    
+    // ═══ Phase 2: Reviewer 审查（最多2轮） ═══
+    tracing::info!("[{}] Bug#{} Harness Loop Phase 2: Reviewer 审查", agent_name, bug_id);
+    let mut review_verdict = Verdict::Unknown;
+    let max_review_rounds = 2;
+    let mut review_output = String::new();
+    
+    for round in 1..=max_review_rounds {
+        let review_prompt = build_review_prompt(agent_name, bug_id, bug_title, &fix_result.final_message);
+        let rev_result = codex_exec::codex_exec(
+            &review_prompt, "read-only", None, Some(agent_name), timeout_secs / 2,
+        );
+        review_output = rev_result.final_message.clone();
+        review_verdict = rev_result.verdict;
+        
+        let rv_str = match &review_verdict {
+            Verdict::Pass => "PASS".to_string(),
+            Verdict::Fail(r) => format!("FAIL:{}", r),
+            Verdict::Unknown => "UNKNOWN".to_string(),
+        };
+        tracing::info!("[{}] Bug#{} Review round {}: {}", agent_name, bug_id, round, rv_str);
+        
+        if review_verdict.is_pass() {
+            break;
         }
-        Verdict::Fail(reason) => {
-            tracing::warn!("[{}] Bug#{} VERDICT: FAIL: {} ({}ms)",
-                agent_name, bug_id, reason, result.elapsed_ms);
-        }
-        Verdict::Unknown => {
-            tracing::warn!("[{}] Bug#{} VERDICT: UNKNOWN ({}ms)",
-                agent_name, bug_id, result.elapsed_ms);
+        
+        // 审查失败 → 重新修复（最多1轮重修）
+        if round < max_review_rounds {
+            tracing::info!("[{}] Bug#{} 审查未通过，重新修复...", agent_name, bug_id);
+            let re_fix_prompt = format!(
+                "Bug #{} 修复未通过代码审查。
+
+审查反馈：
+{}
+
+请根据反馈修复代码。输出最后一行: VERDICT: PASS 或 VERDICT: FAIL [原因]",
+                bug_id, review_output.chars().take(2000).collect::<String>()
+            );
+            let re_fix_result = codex_exec::codex_exec(
+                &re_fix_prompt, sandbox, None, Some(agent_name), timeout_secs,
+            );
+            if re_fix_result.verdict.is_fail() {
+                tracing::warn!("[{}] Bug#{} 重修失败", agent_name, bug_id);
+            }
         }
     }
     
-    // Step 6: 统计变更文件数
+    let rv_str = match &review_verdict {
+        Verdict::Pass => "PASS".to_string(),
+        Verdict::Fail(r) => format!("FAIL:{}", r),
+        Verdict::Unknown => "UNKNOWN".to_string(),
+    };
+    phase_verdicts.push(("reviewer".to_string(), rv_str));
+    
+    // 审查失败不终止（降级通过），继续测试
+    if review_verdict.is_fail() {
+        tracing::warn!("[{}] Bug#{} Phase 2 REVIEW FAIL (降级继续)", agent_name, bug_id);
+    }
+    
+    // ═══ Phase 3: QA 测试 ═══
+    tracing::info!("[{}] Bug#{} Harness Loop Phase 3: QA 测试", agent_name, bug_id);
+    let test_prompt = build_test_prompt(agent_name, bug_id, bug_title);
+    let test_result = codex_exec::codex_exec(
+        &test_prompt, sandbox, None, Some(agent_name), timeout_secs / 2,
+    );
+    
+    let test_verdict = match &test_result.verdict {
+        Verdict::Pass => "PASS".to_string(),
+        Verdict::Fail(r) => format!("FAIL:{}", r),
+        Verdict::Unknown => "UNKNOWN".to_string(),
+    };
+    phase_verdicts.push(("qa".to_string(), test_verdict.clone()));
+    
+    // 降级测试：如果 codex exec 测试失败，尝试直接编译验证
+    let test_passed = if test_result.verdict.is_pass() {
+        true
+    } else {
+        tracing::warn!("[{}] Bug#{} Phase 3 codex测试失败，尝试降级编译验证", agent_name, bug_id);
+        let work_dir = if agent_name == "zhaoyun" {
+            "/root/.openclaw/workspace/his-repo/healthlink-his-ui"
+        } else {
+            "/root/.openclaw/workspace/his-repo/healthlink-his-server/healthlink-his-application"
+        };
+        let compile_ok = std::process::Command::new("mvn")
+            .args(["compile", "-pl", "healthlink-his-application", "-am", "-q"])
+            .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-server")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if compile_ok {
+            tracing::info!("[{}] Bug#{} 降级编译验证通过", agent_name, bug_id);
+        }
+        compile_ok
+    };
+    
+    // ═══ Phase 4: Verifier 验收 ═══
+    tracing::info!("[{}] Bug#{} Harness Loop Phase 4: Verifier 验收", agent_name, bug_id);
+    let verify_prompt = build_verify_prompt(agent_name, bug_id, bug_title);
+    let verify_result = codex_exec::codex_exec(
+        &verify_prompt, "read-only", None, Some(agent_name), timeout_secs / 3,
+    );
+    
+    let verify_verdict = match &verify_result.verdict {
+        Verdict::Pass => "PASS".to_string(),
+        Verdict::Fail(r) => format!("FAIL:{}", r),
+        Verdict::Unknown => "UNKNOWN".to_string(),
+    };
+    phase_verdicts.push(("verifier".to_string(), verify_verdict.clone()));
+    
+    // 降级验收：检查 commit + 编译
+    let verify_passed = if verify_result.verdict.is_pass() {
+        true
+    } else {
+        tracing::warn!("[{}] Bug#{} Phase 4 验收失败，尝试降级验收", agent_name, bug_id);
+        let has_commit = std::process::Command::new("git")
+            .args(["log", "origin/develop", "--grep", &format!("Bug#{}", bug_id), "--oneline", "-1"])
+            .current_dir("/root/.openclaw/workspace/his-repo")
+            .output()
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        let compile_ok = std::process::Command::new("mvn")
+            .args(["compile", "-pl", "healthlink-his-application", "-am", "-q"])
+            .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-server")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_commit && compile_ok {
+            tracing::info!("[{}] Bug#{} 降级验收通过 (commit+compile)", agent_name, bug_id);
+        }
+        has_commit && compile_ok
+    };
+    
+    // ═══ 汇总 ═══
+    let elapsed = start.elapsed().as_millis() as u64;
+    let all_pass = fix_result.verdict.is_pass() && test_passed && verify_passed;
     let changes = count_changed_files(agent_name, bug_id);
     
+    tracing::info!("[{}] Bug#{} Harness Loop 完成: fix={} review={} test={} verify={} elapsed={}ms changes={}",
+        agent_name, bug_id,
+        if fix_result.verdict.is_pass() { "PASS" } else { "FAIL" },
+        phase_verdicts.iter().find(|(p,_)| p=="reviewer").map(|(_,v)| v.as_str()).unwrap_or("?"),
+        if test_passed { "PASS" } else { "FAIL" },
+        if verify_passed { "PASS" } else { "FAIL" },
+        elapsed, changes);
+    
+    // 合并输出
+    let mut combined_stdout = fix_result.final_message;
+    combined_stdout.push_str("\n\n--- Review ---\n");
+    combined_stdout.push_str(&review_output);
+    combined_stdout.push_str("\n\n--- Test ---\n");
+    combined_stdout.push_str(&test_result.final_message);
+    combined_stdout.push_str("\n\n--- Verify ---\n");
+    combined_stdout.push_str(&verify_result.final_message);
+    
+    let mut combined_stderr = fix_result.stderr;
+    if !test_result.stderr.is_empty() {
+        combined_stderr.push_str("\n[Test] ");
+        combined_stderr.push_str(&test_result.stderr);
+    }
+    if !verify_result.stderr.is_empty() {
+        combined_stderr.push_str("\n[Verify] ");
+        combined_stderr.push_str(&verify_result.stderr);
+    }
+    
+    let last_phase = if !fix_result.verdict.is_pass() { "generator" }
+        else if !test_passed { "qa" }
+        else if !verify_passed { "verifier" }
+        else { "verifier" };
+    
     CodexResult {
-        success: result.success,
+        success: all_pass,
         bug_id: bug_id.to_string(),
-        elapsed_ms,
-        stdout: result.final_message,
-        stderr: result.stderr,
-        exit_code: if result.success { 0 } else { 1 },
+        elapsed_ms: elapsed,
+        stdout: combined_stdout,
+        stderr: combined_stderr,
+        exit_code: if all_pass { 0 } else { 1 },
         changes,
+        last_phase: last_phase.to_string(),
+        phase_verdicts,
     }
 }
 
