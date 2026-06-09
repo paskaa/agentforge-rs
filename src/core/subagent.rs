@@ -1836,7 +1836,7 @@ pub fn run_harness_loop(
     for round in 1..=max_review_rounds {
         let review_prompt = build_review_prompt(agent_name, bug_id, bug_title, &fix_result.final_message);
         let rev_result = codex_exec::codex_exec(
-            &review_prompt, "read-only", None, Some(agent_name), timeout_secs / 2,
+            &review_prompt, "read-only", None, Some(agent_name), timeout_secs * 2 / 3,
         );
         review_output = rev_result.final_message.clone();
         review_verdict = rev_result.verdict;
@@ -1889,7 +1889,7 @@ pub fn run_harness_loop(
     tracing::info!("[{}] Bug#{} Harness Loop Phase 3: QA 测试", agent_name, bug_id);
     let test_prompt = build_test_prompt(agent_name, bug_id, bug_title);
     let test_result = codex_exec::codex_exec(
-        &test_prompt, sandbox, None, Some(agent_name), timeout_secs / 2,
+        &test_prompt, sandbox, None, Some(agent_name), timeout_secs * 2 / 3,
     );
     
     let test_verdict = match &test_result.verdict {
@@ -1925,7 +1925,7 @@ pub fn run_harness_loop(
     tracing::info!("[{}] Bug#{} Harness Loop Phase 4: Verifier 验收", agent_name, bug_id);
     let verify_prompt = build_verify_prompt(agent_name, bug_id, bug_title);
     let verify_result = codex_exec::codex_exec(
-        &verify_prompt, "read-only", None, Some(agent_name), timeout_secs / 3,
+        &verify_prompt, "read-only", None, Some(agent_name), timeout_secs / 2,
     );
     
     let verify_verdict = match &verify_result.verdict {

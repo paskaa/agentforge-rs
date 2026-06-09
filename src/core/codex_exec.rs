@@ -177,25 +177,67 @@ pub fn codex_exec(
     let work_dir = "/root/.openclaw/workspace/his-repo";
     cmd.current_dir(work_dir);
 
-    // 执行
-    let output = match cmd.output() {
-        Ok(o) => o,
+    // 执行（带超时保护：spawn + try_wait 循环）
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => {
             return CodexExecResult {
-                success: false,
-                final_message: String::new(),
+                success: false, final_message: String::new(),
                 verdict: Verdict::Fail(format!("spawn error: {}", e)),
-                events: vec![],
-                total_tokens: 0,
+                events: vec![], total_tokens: 0,
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 stderr: format!("spawn error: {}", e),
             };
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_success = true;
+    let elapsed_ms;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                use std::io::Read;
+                let mut so = Vec::new();
+                let mut se = Vec::new();
+                let _ = child.stdout.take().map(|mut r| r.read_to_end(&mut so));
+                let _ = child.stderr.take().map(|mut r| r.read_to_end(&mut se));
+                stdout = String::from_utf8_lossy(&so).to_string();
+                stderr = String::from_utf8_lossy(&se).to_string();
+                exit_success = _status.success();
+                elapsed_ms = start.elapsed().as_millis() as u64;
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout_duration {
+                    tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex", timeout_secs);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return CodexExecResult {
+                        success: false, final_message: String::new(),
+                        verdict: Verdict::Fail(format!("timeout after {}s", timeout_secs)),
+                        events: vec![], total_tokens: 0,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        stderr: format!("codex timed out after {}s", timeout_secs),
+                    };
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            Err(e) => {
+                return CodexExecResult {
+                    success: false, final_message: String::new(),
+                    verdict: Verdict::Fail(format!("try_wait error: {}", e)),
+                    events: vec![], total_tokens: 0,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    stderr: format!("process error: {}", e),
+                };
+            }
+        }
+    }
+
 
     // 解析 JSONL 事件流
     let mut events = Vec::new();
@@ -231,7 +273,7 @@ pub fn codex_exec(
     }
 
     let verdict = parse_verdict(&final_message);
-    let success = output.status.success() && verdict.is_pass();
+    let success = exit_success && verdict.is_pass();
 
     tracing::info!(
         "[codex_exec] completed: verdict={} tokens={} elapsed={}ms",
