@@ -83,7 +83,7 @@ impl LlmClient {
     pub fn new(api_base: &str, api_key: &str, default_model: &str) -> Self {
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(120))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
             api_base: api_base.to_string(),
@@ -99,7 +99,7 @@ impl LlmClient {
     pub fn from_config(cfg: &crate::config::Config) -> Self {
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(120))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
             api_base: cfg.llm.api_base.clone(),

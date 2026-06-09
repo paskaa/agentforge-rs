@@ -1861,14 +1861,7 @@ pub fn run_harness_loop(
                     tracing::warn!("[{}] Compile errors:
 {}", agent_name, err_summary);
 
-                    // 超时保护：总时间超过 timeout_secs 则停止
-                    if start.elapsed().as_secs() > timeout_secs {
-                        tracing::error!("[{}] Bug#{} compile retry timeout after {} attempts ({}ms)",
-                            agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
-                        break;
-                    }
-
-                    // 构建编译错误反馈 prompt，让 Codex 修复
+                    // 构建编译错误反馈 prompt，让 Codex 修复（无限制重试）
                     let feedback_prompt = format!(
                         "## 编译失败反馈 (第{}次重试)
 
@@ -1888,10 +1881,11 @@ pub fn run_harness_loop(
                         请直接修改文件修复编译错误。",
                         compile_attempt, err_summary
                     );
+                    // 传入 0 表示无超时限制，让Codex自主修复直到完成
                     let retry_result = codex_exec::codex_exec(
                         &feedback_prompt, sandbox,
                         Some("/root/agentforge-rs/schemas/verdict.json"),
-                        Some(agent_name), timeout_secs / 2,
+                        Some(agent_name), 0,
                     );
                     tracing::info!("[{}] Bug#{} compile retry {} Codex verdict: {:?}",
                         agent_name, bug_id, compile_attempt, retry_result.verdict);
@@ -1903,21 +1897,9 @@ pub fn run_harness_loop(
             }
         }
 
-        if compile_ok {
-            tracing::info!("[{}] Bug#{} Phase 1 UNKNOWN but compile OK → treating as PASS",
-                agent_name, bug_id);
-            // 把 verdict 修正为 Pass（有变更 + 编译通过）
-        } else {
-            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + compile FAIL after {} retries → giving up",
-                agent_name, bug_id, compile_attempt);
-            let elapsed = start.elapsed().as_millis() as u64;
-            return CodexResult {
-                success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
-                stdout: fix_result.final_message, stderr: last_compile_err,
-                exit_code: 1, changes,
-                last_phase: "generator".to_string(), phase_verdicts,
-            };
-        }
+        // compile_ok 必然为 true（无限循环直到编译通过）
+        tracing::info!("[{}] Bug#{} compile passed after {} attempts ({}ms) ✅",
+            agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
     }
     
     // ═══ Phase 2: Reviewer 审查（最多2轮） ═══

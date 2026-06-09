@@ -426,7 +426,7 @@ impl AgentExecutor {
 
                 let attempt_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     tokio::task::block_in_place(|| {
-                        subagent::run_codex_fix_v2(&an, &bid, &m, 10800)
+                        subagent::run_codex_fix_v2(&an, &bid, &m, 0)
                     })
                 })) {
                     Ok(r) => r,
