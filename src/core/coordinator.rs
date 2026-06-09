@@ -257,14 +257,36 @@ pub fn list_agents_cli() {
 
 /// Download bug attachments and analyze via LLM vision.
 pub async fn analyze_bug_cli(bug_id: &str) -> anyhow::Result<()> {
-    let Ok(out) = Command::new("bash")
-        .arg(format!("{}/zentao-bug-analyze.sh", ZENTAO_DIR))
-        .arg(bug_id)
-        .output()
-    else {
-        println!("分析 Bug #{} 失败", bug_id);
+    // 优先走 Rust API + OCR 文本链路（内置，不依赖外部脚本）
+    match crate::config::Config::load() {
+        Ok(cfg) => {
+            let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+            match client.get_bug(bug_id).await {
+                Ok(detail) => {
+                    println!("{}", detail.format_for_prompt());
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("analyze_bug_cli API 回退到 shell: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("analyze_bug_cli 加载配置失败，回退到 shell: {}", e);
+        }
+    }
+
+    // 兜底：兼容已部署的外部脚本路径
+    let analyze_script = format!("{}/zentao-bug-analyze.sh", ZENTAO_DIR);
+    if !std::path::Path::new(&analyze_script).exists() {
+        println!("分析 Bug #{} 失败：API 不可用且缺少脚本 {}", bug_id, analyze_script);
         return Ok(());
-    };
+    }
+
+    let out = Command::new("bash")
+        .arg(analyze_script)
+        .arg(bug_id)
+        .output()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     println!("{}", stdout.trim());
     if !out.status.success() {
@@ -506,5 +528,4 @@ mod tests {
         assert_eq!(route_bug("前端vue组件渲染问题"), "zhaoyun");
     }
 }
-
 
