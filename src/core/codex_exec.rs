@@ -196,7 +196,8 @@ pub fn codex_exec(
         }
     };
 
-    let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+    let no_timeout = timeout_secs == 0;
+    let timeout_duration = if no_timeout { std::time::Duration::from_secs(u64::MAX) } else { std::time::Duration::from_secs(timeout_secs) };
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_success = true;
@@ -217,7 +218,7 @@ pub fn codex_exec(
                 break;
             }
             Ok(None) => {
-                if start.elapsed() > timeout_duration {
+                if !no_timeout && start.elapsed() > timeout_duration {
                     tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex", timeout_secs);
                     let _ = child.kill();
                     let _ = child.wait();

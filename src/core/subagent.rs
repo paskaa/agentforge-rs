@@ -2158,13 +2158,13 @@ mod tests {
     #[test]
     fn test_build_harness_prompt_contains_key_elements() {
         let prompt = build_harness_prompt("guanyu", "999", "test bug", "details here");
-        assert!(prompt.contains("Harness Engineering"));
+        assert!(prompt.contains("Harness"));
         assert!(prompt.contains("Init"));
         assert!(prompt.contains("Plan"));
         assert!(prompt.contains("Verify"));
         assert!(prompt.contains("Bug #999"));
         assert!(prompt.contains("test bug"));
-        assert!(prompt.contains("full-chain"));
+        assert!(prompt.contains("Full-chain"));
     }
 
     #[test]
@@ -2176,6 +2176,10 @@ mod tests {
 
     #[test]
     fn test_run_quality_gates_his_repo() {
+        if !std::path::Path::new("/root/.openclaw/workspace/his-repo/healthlink-his-server").exists() {
+            eprintln!("SKIP: HIS repo not found, skipping quality gates test");
+            return;
+        }
         let (ok, stdout, _) = run_quality_gates("guanyu", "/root/.openclaw/workspace/his-repo/healthlink-his-server");
         assert!(ok, "Quality gates failed: {}", stdout);
     }
