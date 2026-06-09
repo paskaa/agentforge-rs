@@ -469,7 +469,8 @@ impl AgentExecutor {
                 last_phase: "generator".to_string(), phase_verdicts: vec![],
             });
 
-            // ── 文件快照 Diff：计算修复变更 ──
+            // ── 文件快照 Diff：计算修复变更（仅用于信息展示，不再覆盖 success 判定）──
+            // 铁律: success 判定必须基于 worktree 实际变更，不能用主仓库快照覆盖
             let file_diff = {
                 let snapshot_key = format!("file_snapshot:{}:{}", an, bid);
                 let snapshot_json: String = redis_clone.clone().get(&snapshot_key).await.unwrap_or_default();
@@ -484,15 +485,8 @@ impl AgentExecutor {
             };
             let diff_summary = file_diff.summary();
             let diff_detail = file_diff.detail();
-            // ── 修正：有实际文件变更时，即使 verdict=UNKNOWN 也标记为 ok ──
-            // diff_summary 格式: "新增N个, 修改M个, 删除K个" 或 "无变更"
-            let has_real_changes = diff_summary != "无变更" && !diff_summary.is_empty();
-            if !r.success && has_real_changes {
-                tracing::info!("[{}] Fix #{}: overriding failed→ok (verdict=UNKNOWN but {} files changed)", an, bid, diff_summary);
-                r.success = true;
-            } else if !r.success && !has_real_changes {
-                tracing::warn!("[{}] Fix #{}: confirmed FAIL (verdict=UNKNOWN, no file changes)", an, bid);
-            }
+            // ── 不再用文件快照覆盖 success：success 由 subagent 的 has_fix_commit + changes 判定 ──
+            // 文件快照仅用于日志记录
             tracing::info!("[{}] Fix #{}: ok={} changes={} file_diff={} time={}ms", an, bid, r.success, r.changes, diff_summary, r.elapsed_ms);
             let phase_summary = r.phase_verdicts.iter().map(|(p,v)| format!("{}:{}", p, v)).collect::<Vec<_>>().join(" ");
             let fix_msg = format!("{} | 文件变更: {} | 阶段: {}", r.stdout.chars().take(200).collect::<String>(), diff_summary, phase_summary);

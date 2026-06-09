@@ -232,71 +232,87 @@ impl ZentaoClient {
     /// 给 Bug 添加备注（不改状态）
     /// 给 Bug 添加备注（不改状态）
     /// Zentao REST API 没有独立的 comment 端点，
-    /// 通过 resolve + activate workaround 实现：
-    /// 1. resolve（带 comment）→ 写入备注
-    /// 2. activate（恢复状态）→ 不改状态
+    /// 添加备注（不改变 Bug 状态）
+    /// 使用 update API 仅写入 comment，不触发 resolve/activate 状态变更
     pub async fn comment_bug(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
-        // Step 1: Resolve with comment (this actually writes the comment)
-        let resolve_url = format!("{}/api.php/v1/bugs/{}/resolve", self.base_url, bug_id);
-        let resolve_body = serde_json::json!({
-            "resolution": "fixed", "resolvedBuild": "trunk",
+        // 方案1: 尝试 POST /bugs/{id}/comment（如果禅道版本支持）
+        let comment_url = format!("{}/api.php/v1/bugs/{}/comment", self.base_url, bug_id);
+        let comment_body = serde_json::json!({
             "comment": comment
         });
-        let resp = self.client.post(&resolve_url)
+        let resp = self.client.post(&comment_url)
             .header("Token", &self.token)
-            .json(&resolve_body)
+            .json(&comment_body)
             .send()
             .await;
         match resp {
             Ok(r) if r.status().is_success() => {
-                tracing::info!("[zentao] Bug #{} 备注已添加 (resolve+comment)", bug_id);
+                tracing::info!("[zentao] Bug #{} 备注已添加 (comment API)", bug_id);
+                return Ok(());
             }
-            Ok(r) => {
-                let text = r.text().await.unwrap_or_default();
-                tracing::warn!("[zentao] Bug #{} resolve for comment failed: {}", bug_id, text);
-                anyhow::bail!("Zentao resolve for comment failed: {}", text);
-            }
-            Err(e) => {
-                tracing::warn!("[zentao] Bug #{} resolve for comment error: {}", bug_id, e);
-                anyhow::bail!("Zentao resolve for comment error: {}", e);
+            _ => {
+                // 方案2: 降级使用 update API（只传 comment 字段，不改状态）
+                tracing::debug!("[zentao] Bug #{} comment API 不可用，降级使用 update API", bug_id);
             }
         }
-        // Step 2: Activate to restore status (comment is already written)
-        let activate_url = format!("{}/api.php/v1/bugs/{}/activate", self.base_url, bug_id);
-        let activate_body = serde_json::json!({
-            "openedBuild": "trunk"
+        let update_url = format!("{}/api.php/v1/bugs/{}", self.base_url, bug_id);
+        let update_body = serde_json::json!({
+            "comment": comment
         });
-        let resp2 = self.client.post(&activate_url)
+        let resp2 = self.client.put(&update_url)
             .header("Token", &self.token)
-            .json(&activate_body)
+            .json(&update_body)
             .send()
             .await;
         match resp2 {
             Ok(r) if r.status().is_success() => {
-                tracing::info!("[zentao] Bug #{} 状态已恢复 (activate)", bug_id);
+                tracing::info!("[zentao] Bug #{} 备注已添加 (update API)", bug_id);
+                Ok(())
             }
             Ok(r) => {
                 let text = r.text().await.unwrap_or_default();
-                tracing::warn!("[zentao] Bug #{} activate restore failed: {} (备注已写入，bug 状态可能异常)", bug_id, text);
-                // 尝试再次 activate
-                let retry = self.client.post(&activate_url)
-                    .header("Token", &self.token)
-                    .json(&activate_body)
-                    .send()
-                    .await;
-                if let Ok(rr) = retry {
-                    if rr.status().is_success() {
-                        tracing::info!("[zentao] Bug #{} 第二次 activate 成功", bug_id);
-                    } else {
-                        tracing::error!("[zentao] Bug #{} activate 重试失败，bug 状态可能异常！需人工检查", bug_id);
-                    }
-                }
+                tracing::warn!("[zentao] Bug #{} update for comment failed: {}", bug_id, text);
+                // 方案3: 最终降级用 CLI
+                self.comment_bug_cli(bug_id, comment)
             }
             Err(e) => {
-                tracing::warn!("[zentao] Bug #{} activate restore error: {} (备注已写入，bug 状态可能异常)", bug_id, e);
+                tracing::warn!("[zentao] Bug #{} update for comment error: {}", bug_id, e);
+                self.comment_bug_cli(bug_id, comment)
             }
         }
-        Ok(())
+    }
+
+    /// CLI 降级方案：通过 zentao CLI 添加备注（不改状态）
+    fn comment_bug_cli(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
+        let app_cfg = crate::config::Config::load().unwrap_or_default();
+        let cli = &app_cfg.zentao.cli_path;
+        let _ = std::process::Command::new("bash")
+            .args(["-c", &format!("{} login -s {} -u {} -p {}", cli, app_cfg.zentao.base_url, app_cfg.zentao.username, app_cfg.zentao.password)])
+            .output();
+        let result = std::process::Command::new(cli)
+            .args(["bug", "update", "--id", bug_id, "--comment", comment])
+            .output();
+        match result {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                if stdout.contains("success") || stdout.contains("保存成功") {
+                    tracing::info!("[zentao] Bug #{} 备注已添加 (CLI)", bug_id);
+                    Ok(())
+                } else {
+                    tracing::warn!("[zentao] Bug #{} CLI 备注异常: {}", bug_id, stdout);
+                    anyhow::bail!("CLI comment failed: {}", stdout)
+                }
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                tracing::warn!("[zentao] Bug #{} CLI 备注失败: {}", bug_id, stderr);
+                anyhow::bail!("CLI comment failed: {}", stderr)
+            }
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} CLI 备注错误: {}", bug_id, e);
+                anyhow::bail!("CLI comment error: {}", e)
+            }
+        }
     }
 
     pub async fn assign_bug(&self, bug_id: &str, assign_to: &str, comment: &str) -> anyhow::Result<()> {
