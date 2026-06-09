@@ -871,6 +871,7 @@ fn run_codex_fix_impl(
             let is_skip_output = stdout_trimmed.contains("之前修复已完成") || stdout_trimmed.contains("无需改动");
             
             // ── 问题2: 误判保护 — "已修复"必须有实际变更证据 ──
+            // 铁律: has_real_evidence 必须检查实际文件变更（不只是"声称修复"）
             let has_real_evidence = if is_skip_output {
                 // 声称"已修复"时，必须有 git diff 证据证明代码确实有变更
                 let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
@@ -883,16 +884,14 @@ fn run_codex_fix_impl(
                 }).unwrap_or(false);
                 has_diff || has_fix_commit
             } else {
-                true
+                // 即使不是"声称修复"，也必须有实际变更证据
+                changes > 0 || has_fix_commit
             };
             
+            // 铁律: success 必须要求实际代码变更（changes > 0）或 develop 上有 commit
+            // 不能仅凭 stdout 包含 "fix" 就判定成功
             let success = !is_empty_output && !is_analysis_only && has_real_evidence && (
-                has_fix_commit || (
-                    exit_code == 0 && (
-                        stdout.contains("修复完成") || stdout.contains("fix") || stdout.contains("resolved")
-                        || changes > 0
-                    )
-                )
+                has_fix_commit || (exit_code == 0 && changes > 0)
             );
             
             // 记录判定原因（用于调试）
@@ -951,7 +950,8 @@ fn run_codex_fix_impl(
             }
             
             // Only proceed to commit if all checks passed
-            let ok_to_commit = success && gates_passed && migrations_passed && sql_valid && (changes > 0 || has_fix_commit);
+            // 铁律: ok_to_commit 必须要求 develop 上有实际 commit（不能只看 worktree 未提交变更）
+            let ok_to_commit = success && gates_passed && migrations_passed && sql_valid && has_fix_commit;
 
             // Step 6: Auto-commit changes — only if gates + migrations passed
             if ok_to_commit && changes > 0 {

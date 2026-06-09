@@ -277,10 +277,23 @@ impl ZentaoClient {
             }
             Ok(r) => {
                 let text = r.text().await.unwrap_or_default();
-                tracing::warn!("[zentao] Bug #{} activate restore failed: {} (备注已写入)", bug_id, text);
+                tracing::warn!("[zentao] Bug #{} activate restore failed: {} (备注已写入，bug 状态可能异常)", bug_id, text);
+                // 尝试再次 activate
+                let retry = self.client.post(&activate_url)
+                    .header("Token", &self.token)
+                    .json(&activate_body)
+                    .send()
+                    .await;
+                if let Ok(rr) = retry {
+                    if rr.status().is_success() {
+                        tracing::info!("[zentao] Bug #{} 第二次 activate 成功", bug_id);
+                    } else {
+                        tracing::error!("[zentao] Bug #{} activate 重试失败，bug 状态可能异常！需人工检查", bug_id);
+                    }
+                }
             }
             Err(e) => {
-                tracing::warn!("[zentao] Bug #{} activate restore error: {} (备注已写入)", bug_id, e);
+                tracing::warn!("[zentao] Bug #{} activate restore error: {} (备注已写入，bug 状态可能异常)", bug_id, e);
             }
         }
         Ok(())

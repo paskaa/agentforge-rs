@@ -485,11 +485,13 @@ impl AgentExecutor {
             let diff_summary = file_diff.summary();
             let diff_detail = file_diff.detail();
             // ── 修正：有实际文件变更时，即使 verdict=UNKNOWN 也标记为 ok ──
-            // diff_summary 格式: "+N ~M -K"，检查是否有实际变更
-            let has_real_changes = diff_summary != "+0 ~0 -0" && !diff_summary.is_empty();
+            // diff_summary 格式: "新增N个, 修改M个, 删除K个" 或 "无变更"
+            let has_real_changes = diff_summary != "无变更" && !diff_summary.is_empty();
             if !r.success && has_real_changes {
                 tracing::info!("[{}] Fix #{}: overriding failed→ok (verdict=UNKNOWN but {} files changed)", an, bid, diff_summary);
                 r.success = true;
+            } else if !r.success && !has_real_changes {
+                tracing::warn!("[{}] Fix #{}: confirmed FAIL (verdict=UNKNOWN, no file changes)", an, bid);
             }
             tracing::info!("[{}] Fix #{}: ok={} changes={} file_diff={} time={}ms", an, bid, r.success, r.changes, diff_summary, r.elapsed_ms);
             let phase_summary = r.phase_verdicts.iter().map(|(p,v)| format!("{}:{}", p, v)).collect::<Vec<_>>().join(" ");
