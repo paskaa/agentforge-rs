@@ -1815,34 +1815,101 @@ pub fn run_harness_loop(
                 last_phase: "generator".to_string(), phase_verdicts,
             };
         }
-        // 有变更 — 降级：尝试编译验证
+        // 有变更 — 降级：尝试编译验证（失败则反复重试，不受次数限制）
         tracing::info!("[{}] Bug#{} Phase 1 UNKNOWN but {} files changed, trying compile...",
             agent_name, bug_id, changes);
-        let compile_ok = if agent_name == "zhaoyun" {
-            std::process::Command::new("npx")
-                .args(["vite", "build"])
-                .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-ui")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        } else {
-            std::process::Command::new("mvn")
-                .args(["compile", "-pl", "healthlink-his-application", "-am", "-q"])
-                .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-server")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        };
+        const MAX_COMPILE_RETRIES: u32 = 10;
+        let mut compile_ok = false;
+        let mut last_compile_err = String::new();
+
+        for compile_attempt in 1..=MAX_COMPILE_RETRIES {
+            let compile_output = if agent_name == "zhaoyun" {
+                std::process::Command::new("npx")
+                    .args(["vite", "build", "--mode", "dev"])
+                    .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-ui")
+                    .output()
+            } else {
+                std::process::Command::new("mvn")
+                    .args(["compile", "-pl", "healthlink-his-application", "-am"])
+                    .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-server")
+                    .output()
+            };
+
+            match compile_output {
+                Ok(o) if o.status.success() => {
+                    compile_ok = true;
+                    tracing::info!("[{}] Bug#{} compile attempt {}/{} OK ✅",
+                        agent_name, bug_id, compile_attempt, MAX_COMPILE_RETRIES);
+                    break;
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    last_compile_err = format!("{}
+{}", stderr, stdout);
+                    // 提取关键错误行
+                    let err_summary: String = last_compile_err.lines()
+                        .filter(|l| l.contains("ERROR") || l.contains("error:") 
+                            || l.contains("cannot find") || l.contains("BUILD FAILURE")
+                            || l.contains("Compilation failure") || l.contains("TS"))
+                        .take(20)
+                        .collect::<Vec<_>>().join("
+");
+                    tracing::warn!("[{}] Bug#{} compile attempt {}/{} FAILED, retrying with feedback...",
+                        agent_name, bug_id, compile_attempt, MAX_COMPILE_RETRIES);
+                    tracing::warn!("[{}] Compile errors:
+{}", agent_name, err_summary);
+
+                    if compile_attempt >= MAX_COMPILE_RETRIES {
+                        break;
+                    }
+
+                    // 构建编译错误反馈 prompt，让 Codex 修复
+                    let feedback_prompt = format!(
+                        "## 编译失败反馈 (第{}次重试)
+
+                        你之前的修复代码编译失败。请根据以下编译错误修复代码：
+
+                        ### 编译错误
+```
+{}
+```
+
+                        ### 要求
+                        1. 仔细分析编译错误的根因
+                        2. 修复所有编译错误（不能只修一部分）
+                        3. 确保引用的类/方法/变量都存在
+                        4. 修改后输出 VERDICT: PASS 或 VERDICT: FAIL [原因]
+
+                        请直接修改文件修复编译错误。",
+                        compile_attempt, err_summary
+                    );
+                    let retry_result = codex_exec::codex_exec(
+                        &feedback_prompt, sandbox,
+                        Some("/root/agentforge-rs/schemas/verdict.json"),
+                        Some(agent_name), timeout_secs / 2,
+                    );
+                    tracing::info!("[{}] Bug#{} compile retry {} Codex verdict: {:?}",
+                        agent_name, bug_id, compile_attempt, retry_result.verdict);
+                }
+                Err(e) => {
+                    tracing::error!("[{}] Bug#{} compile command error: {}", agent_name, bug_id, e);
+                    break;
+                }
+            }
+        }
+
         if compile_ok {
             tracing::info!("[{}] Bug#{} Phase 1 UNKNOWN but compile OK → treating as PASS",
                 agent_name, bug_id);
             // 把 verdict 修正为 Pass（有变更 + 编译通过）
         } else {
-            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + compile FAIL → FAIL", agent_name, bug_id);
+            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + compile FAIL after {} retries → FAIL",
+                agent_name, bug_id, MAX_COMPILE_RETRIES);
             let elapsed = start.elapsed().as_millis() as u64;
             return CodexResult {
                 success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
-                stdout: fix_result.final_message, stderr: fix_result.stderr,
+                stdout: fix_result.final_message, stderr: last_compile_err,
                 exit_code: 1, changes,
                 last_phase: "generator".to_string(), phase_verdicts,
             };
