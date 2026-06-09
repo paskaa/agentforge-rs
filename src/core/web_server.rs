@@ -214,12 +214,17 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         let is_locked = locked(id);
         let bug = if is_locked { current_bug_for(id) } else { String::new() };
         let (rate_str, avg_str) = if let Some(ref pool) = s.pool {
-            let fc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE agent_id = ?1 AND event IN ('fix_done','test_done','verify_done','doc_done','analyze_done','pm_routed')")
-                .bind(id).fetch_one(pool).await.unwrap_or(0);
-            let sc: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM traces WHERE agent_id = ?1 AND event IN ('fix_done','test_done','verify_done','doc_done','analyze_done') AND status = 'ok'")
-                .bind(id).fetch_one(pool).await.unwrap_or(0);
-            let avg: f64 = sqlx::query_scalar("SELECT COALESCE(AVG(duration_ms),0) FROM traces WHERE agent_id = ?1 AND event IN ('fix_done','test_done','verify_done','doc_done','analyze_done')")
-                .bind(id).fetch_one(pool).await.unwrap_or(0.0);
+            // 归一化 agent_id：同时查英文 ID 和中文名，合并统计
+            // 只统计 fix_done 事件（与 analytics 保持一致）
+            let fc: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM traces WHERE agent_id IN (?1, ?2) AND event = 'fix_done'")
+                .bind(id).bind(name).fetch_one(pool).await.unwrap_or(0);
+            let sc: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM traces WHERE agent_id IN (?1, ?2) AND event = 'fix_done' AND status = 'ok'")
+                .bind(id).bind(name).fetch_one(pool).await.unwrap_or(0);
+            let avg: f64 = sqlx::query_scalar(
+                "SELECT COALESCE(AVG(duration_ms),0) FROM traces WHERE agent_id IN (?1, ?2) AND event = 'fix_done'")
+                .bind(id).bind(name).fetch_one(pool).await.unwrap_or(0.0);
             let rate = if fc > 0 { sc as f64 / fc as f64 * 100.0 } else { 0.0 };
             (format!("{:.1}%", rate), format!("{:.0}s", avg / 1000.0))
         } else { ("N/A".into(), "N/A".into()) };
@@ -232,15 +237,36 @@ async fn dashboard(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     }
 
     // Stats — use zentao cache for real bug counts
+    // Auto-refresh if cache is empty or stale (>60s)
     {
-        let cache = s.zentao_cache.read().await;
-        if let Some((ref json, _ts)) = *cache {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
-                r.stats.total = v.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
-                r.stats.fixed_today = v.get("fixed_today").and_then(|x| x.as_i64()).unwrap_or(0);
-                let unc = v.get("unclosed").and_then(|x| x.as_i64()).unwrap_or(0);
-                let unres = v.get("unresolved").and_then(|x| x.as_i64()).unwrap_or(0);
+        let need_refresh = {
+            let cache = s.zentao_cache.read().await;
+            match cache.as_ref() {
+                None => true,
+                Some((_, ts)) => ts.elapsed() > std::time::Duration::from_secs(60),
+            }
+        };
+        if need_refresh {
+            let stats = fetch_zentao_stats(&s.pool).await;
+            if let Ok(json_str) = serde_json::to_string(&stats) {
+                let mut cache = s.zentao_cache.write().await;
+                *cache = Some((json_str.clone(), std::time::Instant::now()));
+                r.stats.total = stats.total;
+                r.stats.fixed_today = stats.fixed_today;
+                let unc = stats.unclosed;
+                let unres = stats.unresolved;
                 r.stats.rate = if unc > 0 { format!("{:.1}%", (unc - unres) as f64 / unc as f64 * 100.0) } else { "N/A".into() };
+            }
+        } else {
+            let cache = s.zentao_cache.read().await;
+            if let Some((ref json, _ts)) = *cache {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+                    r.stats.total = v.get("total").and_then(|x| x.as_i64()).unwrap_or(0);
+                    r.stats.fixed_today = v.get("fixed_today").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let unc = v.get("unclosed").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let unres = v.get("unresolved").and_then(|x| x.as_i64()).unwrap_or(0);
+                    r.stats.rate = if unc > 0 { format!("{:.1}%", (unc - unres) as f64 / unc as f64 * 100.0) } else { "N/A".into() };
+                }
             }
         }
     }
@@ -641,16 +667,33 @@ async fn status_ticker(tx: broadcast::Sender<String>) {
     }
 }
 
+// ── Background zentao cache refresher — 每 5 分钟自动刷新 ──
+
+async fn zentao_cache_refresher(cache: Arc<tokio::sync::RwLock<Option<(String, std::time::Instant)>>>, pool: Option<SqlitePool>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    loop {
+        interval.tick().await;
+        tracing::info!("[zentao-cache] Auto-refreshing...");
+        let stats = fetch_zentao_stats(&pool).await;
+        if let Ok(json_str) = serde_json::to_string(&stats) {
+            let mut c = cache.write().await;
+            *c = Some((json_str, std::time::Instant::now()));
+            tracing::info!("[zentao-cache] Refreshed: total={} active={} fixed_today={}", stats.total, stats.active, stats.fixed_today);
+        }
+    }
+}
+
 // ── Entrypoint ──
 
 pub async fn start_web_server(pool: Option<SqlitePool>, port: u16) -> anyhow::Result<()> {
     let (tx, _) = broadcast::channel::<String>(64);
 
+    let zentao_cache = Arc::new(tokio::sync::RwLock::new(None));
     let state = Arc::new(AppState {
-        pool,
+        pool: pool.clone(),
         scores_path: "/var/lib/agentforge/agent_scores.json".into(),
         tx: tx.clone(),
-        zentao_cache: Arc::new(tokio::sync::RwLock::new(None)),
+        zentao_cache: zentao_cache.clone(),
     });
 
 
@@ -1023,27 +1066,41 @@ async fn deploy_status_api() -> impl IntoResponse {
 /// Parse a datetime string like "Tue 2025-06-02 14:30:00 CST" or "2025-06-02 14:30:00 +0800"
 /// into a unix timestamp for comparison.
 fn parse_timestamp(s: &str) -> Option<i64> {
-    use chrono::NaiveDateTime;
+    use chrono::{NaiveDateTime, DateTime, FixedOffset, Utc, TimeZone};
     let s = s.trim();
-    // Try parsing "YYYY-MM-DD HH:MM:SS" (possibly with timezone suffix)
-    // Strip common prefixes like "Mon ", "Tue ", etc.
+    // Strip day-of-week prefix like "Mon ", "Tue ", etc.
     let stripped = if s.len() > 4 && s.as_bytes()[3] == b' ' {
         &s[4..]
     } else {
         s
     };
-    // Try "YYYY-MM-DD HH:MM:SS" format
-    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S") {
+    // Try "YYYY-MM-DD HH:MM:SS +0800" format (with numeric offset)
+    if let Ok(dt) = DateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S %z") {
+        return Some(dt.timestamp());
+    }
+    // Try "YYYY-MM-DD HH:MM:SS.ffffff +0800" format
+    if let Ok(dt) = DateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S%.f %z") {
+        return Some(dt.timestamp());
+    }
+    // Strip trailing timezone name (CST, UTC, GMT) — treat as +0800 (China Standard Time)
+    let clean = stripped
+        .trim_end_matches(" CST")
+        .trim_end_matches(" UTC")
+        .trim_end_matches(" GMT")
+        .trim_end();
+    // Try "YYYY-MM-DD HH:MM:SS" format (assume UTC)
+    if let Ok(dt) = NaiveDateTime::parse_from_str(clean, "%Y-%m-%d %H:%M:%S") {
         return Some(dt.and_utc().timestamp());
     }
     // Try "YYYY-MM-DDTHH:MM:SS" format (ISO)
-    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%dT%H:%M:%S") {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(clean, "%Y-%m-%dT%H:%M:%S") {
         return Some(dt.and_utc().timestamp());
     }
     // Try with fractional seconds "YYYY-MM-DD HH:MM:SS.ffffff"
-    if let Ok(dt) = NaiveDateTime::parse_from_str(stripped, "%Y-%m-%d %H:%M:%S%.f") {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(clean, "%Y-%m-%d %H:%M:%S%.f") {
         return Some(dt.and_utc().timestamp());
     }
+    tracing::warn!("[parse_timestamp] Failed to parse: {:?}", s);
     None
 }
 
@@ -1052,6 +1109,8 @@ fn parse_timestamp(s: &str) -> Option<i64> {
     // Start background ticker
     tokio::spawn(status_ticker(tx.clone()));
     tokio::spawn(redis_trace_subscriber(tx));
+    // 启动 zentao cache 自动刷新
+    tokio::spawn(zentao_cache_refresher(zentao_cache, pool));
 
     let app = Router::new()
         .route("/api/health", get(health))

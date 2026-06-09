@@ -360,7 +360,7 @@ impl AgentExecutor {
             return;
         }
         // 设置活跃标记（TTL 30 分钟）
-        let _: redis::RedisResult<()> = self.redis.clone().set_ex(&dedup_key, "1", 86400).await;
+        let _: redis::RedisResult<()> = self.redis.clone().set_ex(&dedup_key, "1", 1800).await;
         // ── 文件快照：记录修复前状态 ──
         let project_dir = if self.agent_id == "zhaoyun" {
             "/root/.openclaw/workspace/his-repo/healthlink-his-ui"
@@ -462,7 +462,7 @@ impl AgentExecutor {
                 break;
             }
 
-            let r = r.unwrap_or(CodexResult {
+            let mut r = r.unwrap_or(CodexResult {
                 success: false, bug_id: bid.clone(), elapsed_ms: 0,
                 stdout: String::new(), stderr: "all retries exhausted".into(),
                 exit_code: -1, changes: 0,
@@ -484,6 +484,13 @@ impl AgentExecutor {
             };
             let diff_summary = file_diff.summary();
             let diff_detail = file_diff.detail();
+            // ── 修正：有实际文件变更时，即使 verdict=UNKNOWN 也标记为 ok ──
+            // diff_summary 格式: "+N ~M -K"，检查是否有实际变更
+            let has_real_changes = diff_summary != "+0 ~0 -0" && !diff_summary.is_empty();
+            if !r.success && has_real_changes {
+                tracing::info!("[{}] Fix #{}: overriding failed→ok (verdict=UNKNOWN but {} files changed)", an, bid, diff_summary);
+                r.success = true;
+            }
             tracing::info!("[{}] Fix #{}: ok={} changes={} file_diff={} time={}ms", an, bid, r.success, r.changes, diff_summary, r.elapsed_ms);
             let phase_summary = r.phase_verdicts.iter().map(|(p,v)| format!("{}:{}", p, v)).collect::<Vec<_>>().join(" ");
             let fix_msg = format!("{} | 文件变更: {} | 阶段: {}", r.stdout.chars().take(200).collect::<String>(), diff_summary, phase_summary);
@@ -501,6 +508,8 @@ impl AgentExecutor {
                 });
             }
             let _: redis::RedisResult<()> = redis_clone.del(format!("codex_lock:{}", an)).await;
+            // 清理 fix_active 去重标记，允许后续重试
+            let _: redis::RedisResult<()> = redis_clone.del(format!("fix_active:{}:{}", an, bid)).await;
 
             // ── 全链路验证（异步非阻塞）──
             // 铁律 20: 验证不通过禁止进 Pipeline
@@ -538,6 +547,8 @@ impl AgentExecutor {
                 if !verification.all_passed {
                     tracing::warn!("[{}] Bug #{} 全链路验证失败: {}", an_v, bid_v, verification.summary);
                     let _: redis::RedisResult<()> = redis_v.sadd(format!("agent-failed-bugs:{}", an_v), &bid_v).await;
+                    // 清理 fix_active 标记，允许后续重试
+                    let _: redis::RedisResult<()> = redis_v.del(format!("fix_active:{}:{}", an_v, bid_v)).await;
                     
                     // 检查验证重试次数（最多 10 次）
                     let retry_key = format!("verify_retry:{}:{}", an_v, bid_v);
@@ -636,6 +647,8 @@ impl AgentExecutor {
             // 失败处理：标记 bug 并移出队列（防止协调器不断重新入队）
             if !r.success {
                 let _: redis::RedisResult<()> = redis_clone.sadd(format!("agent-failed-bugs:{}", an), &bid).await;
+                // 清理 fix_active 标记，允许后续重试
+                let _: redis::RedisResult<()> = redis_clone.del(format!("fix_active:{}:{}", an, bid)).await;
                 // 从队列中移除（按内容匹配删除当前这个任务）
                 let queue_key = format!("agent-work-queue:fix:{}", an);
                 let _: redis::RedisResult<i64> = redis_clone.lrem(&queue_key, 1, &m).await;

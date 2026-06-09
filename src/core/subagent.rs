@@ -165,23 +165,7 @@ fn load_skill(path: &str) -> String {
 /// Build the full harness-augmented prompt for Codex.
 /// Loads ALL installed harness skills so Codex follows the methodology autonomously.
 fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_details: &str) -> String {
-    let skills_base = "/root/.codex/skills";
-    let harness_eng    = load_skill(&format!("{}/harness-engineering/SKILL.md", skills_base));
-    let walkinglabs    = load_skill(&format!("{}/walkinglabs-harness/SKILL.md", skills_base));
-    let durable_exec   = load_skill(&format!("{}/durable-execution/SKILL.md", skills_base));
-    let closed_loop    = load_skill(&format!("{}/closed-loop-testing/SKILL.md", skills_base));
-    let constraint_d   = load_skill(&format!("{}/constraint-design/SKILL.md", skills_base));
-    let review_audit   = load_skill(&format!("{}/review-audit/SKILL.md", skills_base));
-    let karpathy       = load_skill(&format!("{}/karpathy-guidelines/SKILL.md", skills_base));
-    let full_chain     = load_skill(&format!("{}/full-chain-fix/SKILL.md", skills_base));
-    let bdt            = load_skill(&format!("{}/bug-driven-testing/SKILL.md", skills_base));
-    // AgentForge 自定义技能
-    let af_fix         = load_skill(&format!("{}/agentforge-fix/SKILL.md", skills_base));
-    let af_test        = load_skill(&format!("{}/agentforge-test/SKILL.md", skills_base));
-    let af_verify      = load_skill(&format!("{}/agentforge-verify/SKILL.md", skills_base));
-    let af_archive     = load_skill(&format!("{}/agentforge-archive/SKILL.md", skills_base));
-    let af_db_review   = load_skill(&format!("{}/agentforge-db-review/SKILL.md", skills_base));
-    let af_analyze     = load_skill(&format!("{}/agentforge-analyze/SKILL.md", skills_base));
+    // 精简 prompt：不再加载 15 个 skill 文件，只保留核心信息
 
     let agents_md_path = "/root/.openclaw/workspace/his-repo/AGENTS.md";
     let agents_md_hint = load_skill(agents_md_path)
@@ -206,6 +190,10 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
         else { format!("\n## L5 自动优化约束（基于历史失败分析）\n{}", extras.join("\n")) }
     };
 
+    // 精简 prompt：不再内联 skill 文件，改为路径引用
+    // 原来 15 个 skill 全量加载 → 58KB，模型处理不了
+    // 现在只保留角色 + 铁律 + bug 详情 + 关键指引
+
     format!(
         r#"你是一个中文编程助手。使用简体中文思考和回复。
 
@@ -215,80 +203,21 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 
 {constraints}{extra_constraints}
 
-## Harness Engineering 方法论（必须遵守）
-
-在修复 Bug 之前，阅读并遵循以下方法论：
-
-### 工作纪律
-1. **Init**: 先确认工作目录和项目状态
-2. **Plan**: 分析全链路数据流——录入→保存→查询→修改→删除→关联（6 环）
+## 工作纪律
+1. **Init**: 确认工作目录，读 AGENTS.md 了解项目规范
+2. **Plan**: 分析全链路数据流（6环）：前端→Controller→Service→Mapper→DB→关联模块
 3. **Implement**: 一次只修一个 Bug，只动必要文件
-4. **Verify**: 修改后运行编译/语法检查
+4. **Verify**: 修改后运行 mvn compile / npm run build 验证编译
 5. **Cleanup**: 不留临时文件或调试代码
 
-### 铁律（完整版见 /root/.codex/rules/IRON_LAWS.md，运行时自动加载）
+## 铁律
 - 安全 > 架构 > 质量 > 性能
 - 禁止硬编码密钥/密码
-- 涉及 Mapper XML 时，UNION ALL 所有子查询统一修改
-- 涉及数据库字段时，走通全链路：前端→API→Service→Mapper→DB
-- 涉及交互/状态变更的 BUG：必须同时分析「发起方📤」和「接收方📥」两端
+- 涉及数据库字段时走通全链路 6 环
+- 涉及交互/状态变更：同时分析「发起方」和「接收方」两端
+- 修改后必须编译验证，不通过不提交
 
-```
-# 数据库查询示例
-db-query hisdev "SELECT column_name, is_nullable, data_type FROM information_schema.columns WHERE table_name='表名' ORDER BY ordinal_position;"
-db-query hisdev "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = '表名'::regclass;"
-db-query hisdev "EXPLAIN ANALYZE SELECT ... (验证查询性能)"
-db-query hisdev "SELECT * FROM 表名 WHERE 条件 LIMIT 10; (验证数据)"
-```
-
-## 已加载的技能（融入你的工作方式）
-
-### 🔧 核心方法论
-{harness_eng}
-
-### 📋 实战模式（5 子系统）
-{walkinglabs}
-
-### ⏳ 持久执行（检查点/幂等）
-{durable_exec}
-
-### 🧪 闭环测试（质量门禁）
-{closed_loop}
-
-### 📐 约束设计
-{constraint_d}
-
-### 🔐 审查审计
-{review_audit}
-
-### 🎯 编码准则
-{karpathy}
-
-### 🔗 全链路修复
-{full_chain}
-
-### 🧪 Bug-Driven Testing（先写测试再修 Bug）
-{bdt}
-
-### 🔧 AgentForge 修复技能
-{af_fix}
-
-### 🧪 AgentForge 测试技能
-{af_test}
-
-### ✅ AgentForge 验收技能
-{af_verify}
-
-### 📚 AgentForge 归档技能
-{af_archive}
-
-### 🗄️ AgentForge DB审查技能
-{af_db_review}
-
-### 🔍 AgentForge 分析技能
-{af_analyze}
-
-## 项目规则摘要
+## 项目规范摘要
 {agents_md_hint}
 
 {iron_laws}
@@ -351,10 +280,6 @@ db-query hisdev "SELECT * FROM 表名 WHERE 条件 LIMIT 10; (验证数据)"
         role_name=role_name, role_desc=role_desc, expertise=expertise,
         constraints=constraints,
         bug_id=bug_id, bug_title=bug_title, bug_details=bug_details,
-        harness_eng=harness_eng, walkinglabs=walkinglabs,
-        durable_exec=durable_exec, closed_loop=closed_loop,
-        constraint_d=constraint_d, review_audit=review_audit,
-        karpathy=karpathy, full_chain=full_chain,
         agents_md_hint=agents_md_hint,
     )
 }
@@ -1841,8 +1766,9 @@ pub fn run_harness_loop(
     };
     phase_verdicts.push(("generator".to_string(), fix_verdict.clone()));
     
-    if fix_result.verdict.is_fail() || fix_result.verdict == Verdict::Unknown {
-        tracing::warn!("[{}] Bug#{} Phase 1 FAILED: {:?}", agent_name, bug_id, fix_result.verdict);
+    // ── Phase 1 结果判定：Unknown 不直接失败，检查实际代码变更 ──
+    if fix_result.verdict.is_fail() {
+        tracing::warn!("[{}] Bug#{} Phase 1 FAIL: {:?}", agent_name, bug_id, fix_result.verdict);
         let elapsed = start.elapsed().as_millis() as u64;
         return CodexResult {
             success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
@@ -1850,6 +1776,55 @@ pub fn run_harness_loop(
             exit_code: 1, changes: count_changed_files(agent_name, bug_id),
             last_phase: "generator".to_string(), phase_verdicts,
         };
+    }
+    if fix_result.verdict == Verdict::Unknown {
+        // Unknown — 检查是否有实际代码变更和编译结果
+        let changes = count_changed_files(agent_name, bug_id);
+        tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN — checking real changes: {} files changed",
+            agent_name, bug_id, changes);
+        if changes == 0 {
+            // 真的没改代码，视为失败
+            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + no changes → FAIL", agent_name, bug_id);
+            let elapsed = start.elapsed().as_millis() as u64;
+            return CodexResult {
+                success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
+                stdout: fix_result.final_message, stderr: fix_result.stderr,
+                exit_code: 1, changes: 0,
+                last_phase: "generator".to_string(), phase_verdicts,
+            };
+        }
+        // 有变更 — 降级：尝试编译验证
+        tracing::info!("[{}] Bug#{} Phase 1 UNKNOWN but {} files changed, trying compile...",
+            agent_name, bug_id, changes);
+        let compile_ok = if agent_name == "zhaoyun" {
+            std::process::Command::new("npx")
+                .args(["vite", "build"])
+                .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-ui")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        } else {
+            std::process::Command::new("mvn")
+                .args(["compile", "-pl", "healthlink-his-application", "-am", "-q"])
+                .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-server")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if compile_ok {
+            tracing::info!("[{}] Bug#{} Phase 1 UNKNOWN but compile OK → treating as PASS",
+                agent_name, bug_id);
+            // 把 verdict 修正为 Pass（有变更 + 编译通过）
+        } else {
+            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + compile FAIL → FAIL", agent_name, bug_id);
+            let elapsed = start.elapsed().as_millis() as u64;
+            return CodexResult {
+                success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
+                stdout: fix_result.final_message, stderr: fix_result.stderr,
+                exit_code: 1, changes,
+                last_phase: "generator".to_string(), phase_verdicts,
+            };
+        }
     }
     
     // ═══ Phase 2: Reviewer 审查（最多2轮） ═══

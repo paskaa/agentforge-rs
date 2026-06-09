@@ -94,7 +94,7 @@ impl Analytics {
                 SUM(CASE WHEN status = 'failed' OR status = 'error' THEN 1 ELSE 0 END) as fail,
                 COALESCE(AVG(duration_ms), 0.0) as avg_dur
             FROM traces
-            WHERE event = 'fix_start' OR event = 'fix_done'
+            WHERE event = 'fix_done'
             GROUP BY agent_id
             ORDER BY total DESC
             "#,

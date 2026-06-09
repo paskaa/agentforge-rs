@@ -1,9 +1,9 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-blue?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/version-0.3.0-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.4.0-green" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/agents-8-orange" alt="Agents">
-  <img src="https://img.shields.io/badge/model-mimo--v2.5-purple" alt="Model">
+  <img src="https://img.shields.io/badge/model-codex--exec-purple" alt="Model">
   <img src="https://img.shields.io/badge/maturity-L5-brightgreen" alt="Maturity L5">
   <img src="https://img.shields.io/badge/ui-Element%20Plus-blue" alt="Element Plus">
   <img src="https://img.shields.io/badge/realtime-WebSocket-green" alt="WebSocket">
@@ -45,6 +45,8 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
 - **Full-Chain Fix** — Frontend → Controller → Service → Mapper → DB → Related modules
 - **L4 Analytics** — Data-driven: success rates, failure patterns, agent scoring
 - **L5 Self-Optimizer** — AI auto-tuning: constraints, smart routing, retry strategy with git diff tracking
+- **Harness Loop 4-Phase Cycle** — Generator→Reviewer→QA→Verifier, each phase calls `codex exec` independently with phase-specific prompts and verdicts
+- **Phase-Aware Degradation** — Review fails → continue; QA fails → fallback compile check; Verify fails → commit+compile check
 - **Batch Enqueue** — Select multiple bugs and enqueue to agents from the dashboard
 
 ## 🏗️ Architecture
@@ -73,12 +75,59 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
     │  pipeline_retry:<bug_id>  (retry counter)   │
     │  codex_lock:<agent_id>  (1h TTL)            │
     └─────────────────────────────────────────────┘
+
+### Harness Loop 内部架构
+
+```
+subagent::run_codex_fix_v2()
+  │
+  └─→ subagent::run_harness_loop()
+        │
+        ├─ Phase 1: codex_exec(harness_prompt)        → Verdict
+        ├─ Phase 2: codex_exec(review_prompt) ×2轮     → Verdict
+        ├─ Phase 3: codex_exec(test_prompt)            → Verdict (降级: mvn compile)
+        └─ Phase 4: codex_exec(verify_prompt)          → Verdict (降级: commit+compile)
+        │
+        └─→ CodexResult { last_phase, phase_verdicts }
+```
 ```
 
 ## 🔄 Pipeline Flow
 
+### Harness Loop（4 阶段循环）
+
+每个 Bug 修复自动执行完整的 4 阶段 Harness Loop：
+
 ```
-fix_done (关羽/赵云)
+┌──────────────────────────────────────────────────────────┐
+│                  Harness Loop (per Bug)                    │
+│                                                            │
+│  Phase 1: Generator 修复                                   │
+│    └─ codex exec (workspace-write)                        │
+│    └─ 失败 → 终止循环                                     │
+│                                                            │
+│  Phase 2: Reviewer 审查（最多 2 轮）                       │
+│    └─ codex exec (read-only)                              │
+│    └─ 评分: 设计/工艺/功能/风格 (≥12/20 通过)             │
+│    └─ 失败 → 重修 → 再审                                  │
+│    └─ 仍失败 → 降级继续                                   │
+│                                                            │
+│  Phase 3: QA 测试                                         │
+│    └─ codex exec (编译+测试)                               │
+│    └─ 失败 → 降级: 直接 mvn compile / vite build          │
+│                                                            │
+│  Phase 4: Verifier 验收                                   │
+│    └─ codex exec (commit+编译+测试+回归)                   │
+│    └─ 失败 → 降级: git commit 存在 + 编译通过             │
+│                                                            │
+│  结果: CodexResult { last_phase, phase_verdicts }         │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 全局流水线
+
+```
+fix_done (Harness Loop 完成)
   │
   ▼
 诸葛亮 (分析路由)
@@ -87,16 +136,16 @@ fix_done (关羽/赵云)
   │── 有DB变更 ─→ 荀彧 (DB审查)
   │                     │
   │                     ▼
-  │               张飞 (Playwright测试)
+  │               张飞 (Playwright回归)
   │                     │
-  │               ┌─────┴─────┐
-  │               ▼           ▼
-  │           华佗(验收)   陈琳(归档)
-  │               │
-  │               ▼
-  │          禅道 resolve + assign
+  │               华佗 (产品验收)
+  │                     │
+  │               陈琳 (文档归档)
+  │                     │
+  │               刘备 (协调/关闭禅道)
   │
-  └── 失败 → 回退给修复者重修（最多10次）
+  ▼
+赵云/关羽 (二次修复 ← 验证失败反馈)
 ```
 
 **每个阶段都自动写入禅道备注：**
@@ -393,6 +442,8 @@ agentforge-rs/
 
 ## ⚡ 快速开始
 
+> **v0.4.0**: Harness Loop 已集成到 Rust pipeline。每个 Bug 修复自动执行 Generator→Reviewer→QA→Verifier 4 阶段循环，无需手动调用 shell 脚本。
+
 ```bash
 git clone https://github.com/paskaa/agentforge-rs.git
 cd agentforge-rs
@@ -463,7 +514,7 @@ agentforge-rust@zhugeliang.service  # 诸葛亮
 | L2 管理 | 基本约束 + 反馈 | ✅ 已完成 |
 | L3 定义 | 标准化流程 + 自动提交 + 禅道 | ✅ 已完成 |
 | L4 量化 | 数据驱动优化 | ✅ 已完成 |
-| L5 优化 | AI 自主优化 | ✅ 已完成 |
+| L5 优化 | AI 自主优化 + Harness Loop 4阶段循环 | ✅ 已完成 |
 
 ## 📜 许可证
 

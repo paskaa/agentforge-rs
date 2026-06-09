@@ -179,12 +179,35 @@ async fn main() -> anyhow::Result<()> {
             let scores_path = "/var/lib/agentforge/agent_scores.json";
             let mut optimizer = agentforge::core::self_optimizer::SelfOptimizer::load(scores_path);
 
-            // Update scores from report
+            // 直接从 analytics 数据计算 scores（不用 EMA，避免累积偏差）
             for am in &report.agent_metrics {
+                let agent_id = am.agent_id.clone();
+                let score = optimizer.scores.entry(agent_id.clone()).or_insert_with(|| {
+                    agentforge::core::self_optimizer::AgentScore {
+                        agent_id: agent_id.clone(),
+                        success_rate: 0.0,
+                        avg_duration_s: 0.0,
+                        bug_type_scores: std::collections::HashMap::new(),
+                        overall_score: 0.0,
+                    }
+                });
+                // 直接覆盖 success_rate 和 avg_duration
+                score.success_rate = am.success_rate;
+                score.avg_duration_s = am.avg_duration_s;
+                // 按 bug type 更新分数
                 for bug_type in ["backend", "frontend", "database", "general"] {
-                    let success = am.success_rate > 50.0;
-                    optimizer.update_scores(&am.agent_id, bug_type, success, am.avg_duration_s);
+                    let type_score = score.bug_type_scores.entry(bug_type.to_string()).or_insert(50.0);
+                    if am.success_rate > 50.0 {
+                        *type_score = (*type_score * 0.7 + 60.0 * 0.3).clamp(0.0, 100.0);
+                    } else {
+                        *type_score = (*type_score * 0.7 + 35.0 * 0.3).clamp(0.0, 100.0);
+                    }
                 }
+                // overall = weighted combination
+                score.overall_score = score.success_rate * 0.6
+                    + (100.0 - score.avg_duration_s.min(100.0)) * 0.2
+                    + score.bug_type_scores.values().copied().sum::<f64>()
+                        / score.bug_type_scores.len().max(1) as f64 * 0.2;
             }
 
             // Generate optimization actions

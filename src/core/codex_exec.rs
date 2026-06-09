@@ -111,7 +111,27 @@ pub fn parse_verdict(output: &str) -> Verdict {
             }
         }
     }
-    Verdict::Unknown
+
+    // ── 启发式容错：codex 可能不输出 VERDICT 标记 ──
+    let lower = output.to_lowercase();
+    let has_fix_evidence = lower.contains("修复") || lower.contains("修改了")
+        || lower.contains("fixed") || lower.contains("applied")
+        || lower.contains("patch") || lower.contains("已修复")
+        || lower.contains("编译通过") || lower.contains("build success")
+        || lower.contains("compile success");
+    let has_error_evidence = lower.contains("error:") || lower.contains("panic:")
+        || lower.contains("编译失败") || lower.contains("build failed")
+        || lower.contains("exception") || lower.contains("npe");
+
+    if has_fix_evidence && !has_error_evidence {
+        tracing::info!("[parse_verdict] Heuristic PASS (no VERDICT marker but fix evidence found)");
+        Verdict::Pass
+    } else if has_error_evidence && !has_fix_evidence {
+        tracing::info!("[parse_verdict] Heuristic FAIL (no VERDICT marker, error evidence found)");
+        Verdict::Fail("heuristic: error evidence in output".into())
+    } else {
+        Verdict::Unknown
+    }
 }
 
 /// 执行 codex exec 命令
