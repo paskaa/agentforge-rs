@@ -173,9 +173,14 @@ pub fn codex_exec(
 
     cmd.arg(&full_task);
 
-    // 设置工作目录
-    let work_dir = "/root/.openclaw/workspace/his-repo";
-    cmd.current_dir(work_dir);
+    // 设置工作目录 — 使用 agent worktree（不是主仓库）
+    // 铁律: Codex 必须在 worktree 中工作，不能在主仓库中修改文件
+    let work_dir = if let Some(agent) = agent_name {
+        format!("/tmp/agentforge-worktrees/{}", agent)
+    } else {
+        "/root/.openclaw/workspace/his-repo".to_string()
+    };
+    cmd.current_dir(&work_dir);
 
     // 执行（带超时保护：spawn + try_wait 循环）
     let mut child = match cmd.spawn() {

@@ -1591,6 +1591,28 @@ fn count_worktree_changes(agent_name: &str) -> u32 {
             }
         }
     }
+    // 兜底：如果worktree无变更，检查主仓库（Codex可能直接修改了主仓库）
+    if total == 0 {
+        let main_repo = "/root/.openclaw/workspace/his-repo";
+        let main_dir = if agent_name == "zhaoyun" {
+            format!("{}/healthlink-his-ui", main_repo)
+        } else {
+            format!("{}/healthlink-his-server", main_repo)
+        };
+        let main_outputs = [
+            Command::new("git").args(["diff", "--stat"]).current_dir(&main_dir).output(),
+            Command::new("git").args(["diff", "--cached", "--stat"]).current_dir(&main_dir).output(),
+        ];
+        for o in main_outputs.into_iter().flatten() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                if let Some(pipe_pos) = line.find('|') {
+                    let nums = &line[pipe_pos+1..];
+                    total += nums.chars().filter(|&c| c == '+' || c == '-').count() as u32;
+                }
+            }
+        }
+    }
     total
 }
 
@@ -2011,17 +2033,53 @@ pub fn run_harness_loop(
 /// 统计变更文件数
 fn count_changed_files(agent_name: &str, bug_id: &str) -> u32 {
     let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "HEAD~1"])
+    // 检查未提交的变更（Codex修改文件后不会自动commit）
+    let uncommitted = Command::new("git")
+        .args(["diff", "--name-only"])
         .current_dir(&worktree)
         .output();
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32
-        }
-        Err(_) => 0,
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&worktree)
+        .output();
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(&worktree)
+        .output();
+    let mut total = 0u32;
+    for o in [uncommitted, staged, untracked].into_iter().flatten() {
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        total += stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32;
     }
+    // 兜底：如果worktree无变更，检查主仓库（Codex可能直接修改了主仓库）
+    if total == 0 {
+        let main_repo = "/root/.openclaw/workspace/his-repo";
+        let main_dir = if agent_name == "zhaoyun" {
+            format!("{}/healthlink-his-ui", main_repo)
+        } else {
+            format!("{}/healthlink-his-server", main_repo)
+        };
+        let main_outputs = [
+            Command::new("git").args(["diff", "--name-only"]).current_dir(&main_dir).output(),
+            Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&main_dir).output(),
+        ];
+        for o in main_outputs.into_iter().flatten() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            total += stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+        }
+        // 也检查最近commit的变更
+        if total == 0 {
+            let committed = Command::new("git")
+                .args(["diff", "--name-only", "HEAD~1"])
+                .current_dir(&worktree)
+                .output();
+            if let Ok(o) = committed {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                total += stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+            }
+        }
+    }
+    total
 }
 
 #[cfg(test)]
