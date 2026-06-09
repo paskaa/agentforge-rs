@@ -55,11 +55,11 @@ const AGENT_ROLES: &[(&str, &str, &str, &str)] = &[
 fn agent_work_dir(agent_name: &str) -> String {
     let base = format!("/tmp/agentforge-worktrees/{}", agent_name);
     if agent_name == "zhaoyun" {
-        format!("{}/openhis-ui-vue3", base)
+        format!("{}/healthlink-his-ui", base)
     } else if agent_name == "xunyu" {
-        format!("{}/openhis-server-new", base)
+        format!("{}/healthlink-his-server", base)
     } else {
-        format!("{}/openhis-server-new", base)
+        format!("{}/healthlink-his-server", base)
     }
 }
 
@@ -674,7 +674,7 @@ fn run_codex_fix_impl(
     };
 
     // Step 1.7: 自动生成 Playwright 测试用例（修复前先设计测试）
-    let test_gen_script = "/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/utils/generate-bug-test.sh";
+    let test_gen_script = "/root/.openclaw/workspace/his-repo/healthlink-his-ui/tests/e2e/utils/generate-bug-test.sh";
     let mut test_generated = false;
     if std::path::Path::new(test_gen_script).exists() && agent_name == "zhaoyun" {
         let test_output = Command::new("bash")
@@ -700,14 +700,14 @@ fn run_codex_fix_impl(
     }
     
     // Step 1.8: 运行修复前测试（应失败，作为基线）
-    let test_spec = format!("/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/specs/bug-{}.spec.ts", bug_id);
+    let test_spec = format!("/root/.openclaw/workspace/his-repo/healthlink-his-ui/tests/e2e/specs/bug-{}.spec.ts", bug_id);
     let pre_test_passed = if std::path::Path::new(&test_spec).exists() && agent_name == "zhaoyun" {
         tracing::info!("[{}] Bug#{} 运行修复前基线测试...", agent_name, bug_id);
         tracing::info!("[{}] Bug#{} 开始修复前基线测试（预期失败）", agent_name, bug_id);
         let pre_test = Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1",
+                "cd /root/.openclaw/workspace/his-repo/healthlink-his-ui && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1",
                 bug_id
             ))
             .output();
@@ -1183,7 +1183,7 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
     } else {
         Command::new("mvn")
             .args(["compile", "-q", "-pl", "openhis-application", "-am"])
-            .current_dir(format!("{}/openhis-server-new", worktree))
+            .current_dir(format!("{}/healthlink-his-server", worktree))
             .output()
     };
     match compile_result {
@@ -2065,7 +2065,7 @@ mod tests {
 
     #[test]
     fn test_run_quality_gates_his_repo() {
-        let (ok, stdout, _) = run_quality_gates("guanyu", "/root/.openclaw/workspace/his-repo/openhis-server-new");
+        let (ok, stdout, _) = run_quality_gates("guanyu", "/root/.openclaw/workspace/his-repo/healthlink-his-server");
         assert!(ok, "Quality gates failed: {}", stdout);
     }
 

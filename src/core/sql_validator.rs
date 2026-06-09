@@ -680,7 +680,7 @@ fn walkdir(root: &Path, subdir: &str) -> std::io::Result<Vec<PathBuf>> {
     // Search for paths containing /mapper/ or /sqlmap/ in the path
     let target_marker = format!("/{}/", subdir);
 
-    let search_path = root.join("openhis-server-new");
+    let search_path = root.join("healthlink-his-server");
     if !search_path.exists() {
         return Ok(results);
     }

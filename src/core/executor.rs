@@ -517,7 +517,12 @@ impl AgentExecutor {
             let mut redis_v = redis_clone.clone();
             // 验证在 develop 分支上跑（main_repo），确保验证的是最终合入的代码
             // 而不是 agent worktree 中的代码
-            let work_dir = "/root/.openclaw/workspace/his-repo/openhis-server-new".to_string();
+            // 铁律: 前端 agent 用前端目录，后端 agent 用后端目录
+            let work_dir = if an_v == "zhaoyun" {
+                "/root/.openclaw/workspace/his-repo/healthlink-his-ui".to_string()
+            } else {
+                "/root/.openclaw/workspace/his-repo/healthlink-his-server".to_string()
+            };
             tokio::spawn(async move {
                 // 确保在 develop 分支上验证（可能被其他 agent 切换过）
                 let _ = std::process::Command::new("git")
@@ -716,7 +721,7 @@ impl AgentExecutor {
             Duration::from_secs(120),
             tokio::process::Command::new("bash")
                 .arg("-c")
-                .arg(format!("cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1", bid))
+                .arg(format!("cd /root/.openclaw/workspace/his-repo/healthlink-his-ui && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1", bid))
                 .output()
         ).await;
 
@@ -968,7 +973,7 @@ impl AgentExecutor {
                 .fetch_all(pool).await.unwrap_or_default();
 
         // ── Step 2: 收集 Git commit 信息 ──
-        let worktree = "/tmp/agentforge-worktrees/guanyu/openhis-server-new";
+        let worktree = "/tmp/agentforge-worktrees/guanyu/healthlink-his-server";
         let commit_hash = std::process::Command::new("git")
             .args(["-C", worktree, "log", "--oneline", "--format=%h", "-1", "--", "."])
             .output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -1062,7 +1067,7 @@ impl AgentExecutor {
 
         // ── Step 4.5: 🔴 铁律 — 检查是否有文件被删除 ──
         {
-            let worktree = "/tmp/agentforge-worktrees/guanyu/openhis-server-new";
+            let worktree = "/tmp/agentforge-worktrees/guanyu/healthlink-his-server";
             let git_diff = std::process::Command::new("git")
                 .args(["diff", "--name-status", "HEAD~1"])
                 .current_dir(worktree)

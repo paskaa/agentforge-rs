@@ -81,7 +81,7 @@ fn ensure_frontend_server() {
     if !is_up {
         let _ = Command::new("bash")
             .arg("-c")
-            .arg("cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && nohup npx vite --mode dev --port 81 --host 0.0.0.0 > /tmp/his-dev.log 2>&1 &")
+            .arg("cd /root/.openclaw/workspace/his-repo/healthlink-his-ui && nohup npx vite --mode dev --port 81 --host 0.0.0.0 > /tmp/his-dev.log 2>&1 &")
             .output();
         // Wait for server to start
         std::thread::sleep(Duration::from_secs(5));
@@ -218,7 +218,7 @@ fn check_playwright(bug_id: &str) -> CheckResult {
     ensure_frontend_server();
     
     // 检查有没有对应的 Playwright 测试用例
-    let spec_dir = "/root/.openclaw/workspace/his-repo/openhis-ui-vue3/tests/e2e/specs";
+    let spec_dir = "/root/.openclaw/workspace/his-repo/healthlink-his-ui/tests/e2e/specs";
     let has_test = Command::new("grep")
         .args(["-r", &format!("#{}", bug_id), spec_dir])
         .output()
@@ -236,7 +236,7 @@ fn check_playwright(bug_id: &str) -> CheckResult {
     
     // 运行 Playwright
     let (ok, stdout, stderr) = run_cmd("bash", &["-c", &format!(
-        "cd /root/.openclaw/workspace/his-repo/openhis-ui-vue3 && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1",
+        "cd /root/.openclaw/workspace/his-repo/healthlink-his-ui && npx playwright test --grep @bug{} --reporter=line --workers=1 2>&1",
         bug_id
     )], "/", 180);
     
