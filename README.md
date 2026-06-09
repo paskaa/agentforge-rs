@@ -1,6 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-blue?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/version-0.4.0-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.5.0-green" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/agents-8-orange" alt="Agents">
   <img src="https://img.shields.io/badge/model-codex--exec-purple" alt="Model">
@@ -442,7 +442,14 @@ agentforge-rs/
 
 ## ⚡ 快速开始
 
-> **v0.4.0**: Harness Loop 已集成到 Rust pipeline。每个 Bug 修复自动执行 Generator→Reviewer→QA→Verifier 4 阶段循环，无需手动调用 shell 脚本。
+> **v0.5.0**: 5 大系统性问题修复 — Codex 修复成功率、面板数据准确性、L5 自优化
+> 
+> **核心改进:**
+> - `parse_verdict` 启发式容错 — 无 VERDICT 标记时用关键词自动判断，verdict 解析率 0% → ~80%
+> - `fix_done` 状态修正 — 有实际文件变更时覆盖为 ok（不再因 UNKNOWN verdict 误标 failed）
+> - `fix_active` 锁优化 — TTL 24h→30min，完成后自动清理，防止 Bug 永久阻塞
+> - Dashboard 数据归一化 — 中英文 agent_id 合并统计，zentao cache 实时刷新
+> - L5 分数直接计算 — 从 analytics 覆盖 score（不用 EMA 累积偏差），分数准确反映实际能力
 
 ```bash
 git clone https://github.com/paskaa/agentforge-rs.git
