@@ -1818,11 +1818,12 @@ pub fn run_harness_loop(
         // 有变更 — 降级：尝试编译验证（失败则反复重试，不受次数限制）
         tracing::info!("[{}] Bug#{} Phase 1 UNKNOWN but {} files changed, trying compile...",
             agent_name, bug_id, changes);
-        const MAX_COMPILE_RETRIES: u32 = 10;
         let mut compile_ok = false;
         let mut last_compile_err = String::new();
+        let mut compile_attempt = 0u32;
 
-        for compile_attempt in 1..=MAX_COMPILE_RETRIES {
+        loop {
+            compile_attempt += 1;
             let compile_output = if agent_name == "zhaoyun" {
                 std::process::Command::new("npx")
                     .args(["vite", "build", "--mode", "dev"])
@@ -1838,8 +1839,8 @@ pub fn run_harness_loop(
             match compile_output {
                 Ok(o) if o.status.success() => {
                     compile_ok = true;
-                    tracing::info!("[{}] Bug#{} compile attempt {}/{} OK ✅",
-                        agent_name, bug_id, compile_attempt, MAX_COMPILE_RETRIES);
+                    tracing::info!("[{}] Bug#{} compile attempt {} OK ✅ ({}ms elapsed)",
+                        agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
                     break;
                 }
                 Ok(o) => {
@@ -1855,12 +1856,15 @@ pub fn run_harness_loop(
                         .take(20)
                         .collect::<Vec<_>>().join("
 ");
-                    tracing::warn!("[{}] Bug#{} compile attempt {}/{} FAILED, retrying with feedback...",
-                        agent_name, bug_id, compile_attempt, MAX_COMPILE_RETRIES);
+                    tracing::warn!("[{}] Bug#{} compile attempt {} FAILED ({}ms elapsed), retrying with feedback...",
+                        agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
                     tracing::warn!("[{}] Compile errors:
 {}", agent_name, err_summary);
 
-                    if compile_attempt >= MAX_COMPILE_RETRIES {
+                    // 超时保护：总时间超过 timeout_secs 则停止
+                    if start.elapsed().as_secs() > timeout_secs {
+                        tracing::error!("[{}] Bug#{} compile retry timeout after {} attempts ({}ms)",
+                            agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
                         break;
                     }
 
@@ -1904,8 +1908,8 @@ pub fn run_harness_loop(
                 agent_name, bug_id);
             // 把 verdict 修正为 Pass（有变更 + 编译通过）
         } else {
-            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + compile FAIL after {} retries → FAIL",
-                agent_name, bug_id, MAX_COMPILE_RETRIES);
+            tracing::warn!("[{}] Bug#{} Phase 1 UNKNOWN + compile FAIL after {} retries → giving up",
+                agent_name, bug_id, compile_attempt);
             let elapsed = start.elapsed().as_millis() as u64;
             return CodexResult {
                 success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,

@@ -36,6 +36,8 @@ pub struct LlmConfig {
     pub api_key: String,
     pub default_model: String,
     pub coding_model: String,
+    #[serde(default = "default_vision_model")]
+    pub vision_model: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -113,6 +115,10 @@ impl Default for RedisConfig {
         }
     }
 }
+fn default_vision_model() -> String {
+    "mino-v2.5".into()
+}
+
 fn default_zentao_cli() -> String {
     "/usr/local/bin/zentao".into()
 }
@@ -138,6 +144,7 @@ impl Default for LlmConfig {
             api_key: String::new(),
             default_model: String::new(),
             coding_model: String::new(),
+            vision_model: default_vision_model(),
         }
     }
 }

@@ -257,13 +257,38 @@ pub fn list_agents_cli() {
 
 /// Download bug attachments and analyze via LLM vision.
 pub async fn analyze_bug_cli(bug_id: &str) -> anyhow::Result<()> {
-    // 优先走 Rust API + OCR 文本链路（内置，不依赖外部脚本）
+    // 优先走 Rust API + Vision/OCR 链路（内置，不依赖外部脚本）
     match crate::config::Config::load() {
         Ok(cfg) => {
             let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
             match client.get_bug(bug_id).await {
                 Ok(detail) => {
-                    println!("{}", detail.format_for_prompt());
+                    let text_prompt = detail.format_for_prompt();
+                    let mut images: Vec<Vec<u8>> = Vec::new();
+                    for fid in extract_file_ids(&detail.steps) {
+                        if let Ok(bytes) = download_zentao_file(&cfg, &fid).await {
+                            if bytes.len() > 100 {
+                                images.push(bytes);
+                            }
+                        }
+                    }
+
+                    if images.is_empty() {
+                        println!("{}", text_prompt);
+                    } else {
+                        let llm = crate::core::llm::LlmClient::from_config(&cfg);
+                        let system = "你是 HIS 系统的 Bug 分析专家。根据禅道截图与文本信息，输出可执行修复要点。";
+                        let user = format!("以下是 Bug 信息与附件截图。请结合截图识别关键界面问题，并给出修复优先级与前端改动建议。
+
+{}", text_prompt);
+                        match llm.vision(system, &user, &images, Some(&llm.vision_model), None, Some(2048)).await {
+                            Ok(ans) => println!("{}", ans),
+                            Err(e) => {
+                                tracing::warn!("analyze_bug_cli vision 失败，回退到文本: {}", e);
+                                println!("{}", text_prompt);
+                            }
+                        }
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -529,3 +554,52 @@ mod tests {
     }
 }
 
+
+async fn download_zentao_file(cfg: &crate::config::Config, fid: &str) -> anyhow::Result<Vec<u8>> {
+    let token = load_zentao_token(&cfg.zentao.token_file);
+    let url = format!("{}/api.php/v1/files/{}", cfg.zentao.base_url.trim_end_matches('/'), fid);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Token", token)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Zentao file API error: HTTP {}", resp.status());
+    }
+    Ok(resp.bytes().await?.to_vec())
+}
+
+fn extract_file_ids(steps: &str) -> Vec<String> {
+    let mut file_ids = Vec::new();
+    let mut pos = 0;
+    while let Some(idx) = steps[pos..].find("fileID=") {
+        let start = pos + idx + 7;
+        let mut end = start;
+        while end < steps.len() && steps.as_bytes()[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start {
+            file_ids.push(steps[start..end].to_string());
+        }
+        pos = end;
+    }
+    file_ids
+}
+
+fn load_zentao_token(path: &std::path::Path) -> String {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            if let Some(v) = line.strip_prefix("ZENTAO_TOKEN=") {
+                return v.trim().to_string();
+            }
+        }
+    }
+    if let Ok(content) = std::fs::read_to_string("/root/.config/zentao/.env") {
+        for line in content.lines() {
+            if let Some(v) = line.strip_prefix("ZENTAO_TOKEN=") {
+                return v.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
