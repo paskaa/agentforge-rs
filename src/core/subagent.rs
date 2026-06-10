@@ -1093,7 +1093,10 @@ fn extract_file_ids_from_html(html: &str) -> Vec<String> {
             end += 1;
         }
         if end > start {
-            file_ids.push(html[start..end].to_string());
+            let fid = html[start..end].to_string();
+            if !file_ids.contains(&fid) {
+                file_ids.push(fid);
+            }
         }
         pos = end;
     }
@@ -1477,34 +1480,50 @@ fn build_zentao_comment(bug_id: &str, bug_title: &str, root_causes: &[String], f
 /// Resolve a bug in Zentao with structured comment after fix + quality gates pass.
 /// 只加备注不改状态（成功和失败都用）
 fn comment_in_zentao(bug_id: &str, comment: &str) {
-    // Refresh token
+    // 铁律 #16: 备注使用 resolve+activate workaround
+    // 直接调用 comment API 会 404，必须通过 resolve 传 comment
     let app_cfg = crate::config::Config::load().unwrap_or_default();
     let cli = &app_cfg.zentao.cli_path;
     let _ = Command::new("bash")
         .args(["-c", &format!("{} login -s {} -u {} -p {}", cli, app_cfg.zentao.base_url, app_cfg.zentao.username, app_cfg.zentao.password)])
         .output();
 
+    // 转义 comment 中的特殊字符用于 JSON
+    let escaped = comment.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\\n")
+        .replace('\r', "");
+
+    // Step 1: resolve with comment
+    let data = format!(r#"{{"resolution":"fixed","resolvedBuild":"trunk","comment":"{}"}}"#, escaped);
     let result = Command::new(cli)
-        .args(["bug", "update", "--id", bug_id, "--comment", comment])
+        .args(["bug", "resolve", "--id", bug_id, "--data", &data])
         .output();
 
     match result {
         Ok(o) if o.status.success() => {
             let stdout_str = String::from_utf8_lossy(&o.stdout).to_string();
             if stdout_str.contains("success") || stdout_str.contains("保存成功") {
-                tracing::info!("[zentao] Bug #{} 备注已添加", bug_id);
+                tracing::info!("[zentao] Bug #{} 备注已添加 (resolve)", bug_id);
             } else {
                 tracing::warn!("[zentao] Bug #{} 备注异常: {}", bug_id, stdout_str);
             }
         }
         Ok(o) => {
             let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
-            tracing::warn!("[zentao] Bug #{} 备注失败: {}", bug_id, stderr_str);
+            tracing::warn!("[zentao] Bug #{} 备注失败: {}", bug_id, stderr_str.chars().take(200).collect::<String>());
         }
         Err(e) => {
             tracing::warn!("[zentao] Bug #{} 备注错误: {}", bug_id, e);
         }
     }
+
+    // Step 2: activate back to active (resolve changed status)
+    let activate_data = r#"{"openedBuild":"trunk"}"#;
+    let _ = Command::new(cli)
+        .args(["bug", "activate", "--id", bug_id, "--data", activate_data])
+        .output();
+    tracing::info!("[zentao] Bug #{} 状态恢复为 active", bug_id);
 }
 
 /// Agent 对应的禅道账号列表（用于判断 bug 是否分配给人类）
@@ -1549,18 +1568,19 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
     // Step 3: 两种情况都不改状态
     // - 人类分配：只加备注
     // - 智能体分配：加备注 + 改分配给 zhangfei（测试）
-    let result = if is_agent {
-        // 用 --data 传 JSON 同时设置 comment 和 assignedTo
-        let escaped = comment.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
-        let data_json = format!(r#"{{"comment":"{}","assignedTo":"zhangfei"}}"#, escaped);
-        Command::new(&app_cfg.zentao.cli_path)
-            .args(["bug", "update", "--id", bug_id, "--data", &data_json])
-            .output()
+    // 铁律 #16: 备注必须使用 resolve+activate workaround
+    // bug update --comment 不会创建 comment action，必须通过 resolve 传 comment
+    let escaped = comment.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
+
+    // Step 3a: resolve with comment (+ assignedTo if agent)
+    let resolve_data = if is_agent {
+        format!(r#"{{"resolution":"fixed","resolvedBuild":"trunk","comment":"{}","assignedTo":"zhangfei"}}"#, escaped)
     } else {
-        Command::new(&app_cfg.zentao.cli_path)
-            .args(["bug", "update", "--id", bug_id, "--comment", &comment])
-            .output()
+        format!(r#"{{"resolution":"fixed","resolvedBuild":"trunk","comment":"{}"}}"#, escaped)
     };
+    let result = Command::new(&app_cfg.zentao.cli_path)
+        .args(["bug", "resolve", "--id", bug_id, "--data", &resolve_data])
+        .output();
 
     match result {
         Ok(o) if o.status.success() => {
@@ -1570,13 +1590,19 @@ fn resolve_bug_in_zentao(agent_name: &str, bug_id: &str, bug_title: &str, stdout
                     tracing::info!("[{}] Bug #{} 备注已添加 + 分配已改为 zhangfei（智能体分配）: fix(#{}): {}",
                         agent_name, bug_id, bug_id, bug_title);
                 } else {
-                    tracing::info!("[{}] Bug #{} 备注已添加（人类分配，不改状态不改分配）: fix(#{}): {}",
+                    tracing::info!("[{}] Bug #{} 备注已添加（人类分配）: fix(#{}): {}",
                         agent_name, bug_id, bug_id, bug_title);
                 }
-                tracing::debug!("[{}] Zentao comment: {} chars", agent_name, comment.len());
             } else {
                 tracing::warn!("[{}] Bug #{} 操作结果异常: {}", agent_name, bug_id, stdout_str);
             }
+
+            // Step 3b: activate back to active (resolve changed status)
+            let activate_data = r#"{"openedBuild":"trunk"}"#;
+            let _ = Command::new(&app_cfg.zentao.cli_path)
+                .args(["bug", "activate", "--id", bug_id, "--data", activate_data])
+                .output();
+            tracing::info!("[{}] Bug #{} 状态恢复为 active", agent_name, bug_id);
         }
         Ok(o) => {
             let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
