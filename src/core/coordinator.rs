@@ -265,7 +265,7 @@ pub async fn analyze_bug_cli(bug_id: &str) -> anyhow::Result<()> {
                 Ok(detail) => {
                     let text_prompt = detail.format_for_prompt();
                     let mut images: Vec<Vec<u8>> = Vec::new();
-                    for fid in extract_file_ids(&detail.steps) {
+                    for fid in extract_file_ids(&detail.raw_steps_html) {
                         if let Ok(bytes) = download_zentao_file(&cfg, &fid).await {
                             if bytes.len() > 100 {
                                 images.push(bytes);
