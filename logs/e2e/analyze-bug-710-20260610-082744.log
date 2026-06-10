@@ -1,0 +1,400 @@
+warning: unused import: `FileDiff`
+ --> src/core/executor.rs:6:68
+  |
+6 | use crate::core::pipeline::{self, route_bug, Verdict, RoundBudget, FileDiff, HandoffCard, PipelineEvent, check_round_budget, incremen...
+  |                                                                    ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::collections::HashMap`
+  --> src/core/zentao.rs:10:5
+   |
+10 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `post`
+ --> src/core/web_server.rs:6:20
+  |
+6 |     routing::{get, post},
+  |                    ^^^^
+
+warning: unused imports: `FixedOffset` and `Utc`
+    --> src/core/web_server.rs:1069:43
+     |
+1069 |     use chrono::{NaiveDateTime, DateTime, FixedOffset, Utc, TimeZone};
+     |                                           ^^^^^^^^^^^  ^^^
+
+warning: use of deprecated method `redis::Client::get_async_connection`: aio::Connection is deprecated. Use client::get_multiplexed_async_connection instead.
+   --> src/core/trace.rs:183:37
+    |
+183 |             if let Ok(mut conn) = c.get_async_connection().await {
+    |                                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: variable does not need to be mutable
+   --> src/core/executor.rs:465:17
+    |
+465 |             let mut r = r.unwrap_or(CodexResult {
+    |                 ----^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `redis::Client::get_async_connection`: aio::Connection is deprecated. Use client::get_multiplexed_async_connection instead.
+   --> src/core/web_server.rs:625:35
+    |
+625 |     let mut pubsub = match client.get_async_connection().await {
+    |                                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TimeZone`
+    --> src/core/web_server.rs:1069:61
+     |
+1069 |     use chrono::{NaiveDateTime, DateTime, FixedOffset, Utc, TimeZone};
+     |                                                             ^^^^^^^^
+
+warning: unused variable: `agents`
+  --> src/core/coordinator.rs:92:9
+   |
+92 |     let agents = ["zhugeliang", "liubei", "guanyu", "zhaoyun", "xunyu", "zhangfei", "huatuo", "chenlin"];
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_agents`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `detail`
+   --> src/core/trace.rs:148:9
+    |
+148 |         detail: Option<&str>,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_detail`
+
+warning: unused variable: `diff_detail`
+   --> src/core/executor.rs:487:17
+    |
+487 |             let diff_detail = file_diff.detail();
+    |                 ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_diff_detail`
+
+warning: unused variable: `reporter`
+    --> src/core/executor.rs:1603:38
+     |
+1603 | async fn degraded_test(bug_id: &str, reporter: &str) -> bool {
+     |                                      ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reporter`
+
+warning: unused variable: `verify_verdict`
+   --> src/core/executor.rs:956:13
+    |
+956 |         let verify_verdict = Verdict::Pass;
+    |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_verify_verdict`
+
+warning: unused variable: `t`
+    --> src/core/executor.rs:1112:51
+     |
+1112 |                 "traces": traces.iter().map(|(a,e,t,s,m,d,ts)| {
+     |                                                   ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `reporter`
+    --> src/core/executor.rs:1633:40
+     |
+1633 | async fn degraded_verify(bug_id: &str, reporter: &str) -> Verdict {
+     |                                        ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_reporter`
+
+warning: variable `test_generated` is assigned to, but never used
+   --> src/core/subagent.rs:678:9
+    |
+678 |     let mut test_generated = false;
+    |         ^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_test_generated` instead
+
+warning: unused variable: `pre_test_passed`
+   --> src/core/subagent.rs:704:9
+    |
+704 |     let pre_test_passed = if std::path::Path::new(&test_spec).exists() && agent_name == "zhaoyun" {
+    |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_pre_test_passed`
+
+warning: value assigned to `test_generated` is never read
+   --> src/core/subagent.rs:695:21
+    |
+695 |                     test_generated = true;
+    |                     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `test_generated` is never read
+   --> src/core/subagent.rs:691:21
+    |
+691 |                     test_generated = true;
+    |                     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `agent_name`
+    --> src/core/subagent.rs:1691:24
+     |
+1691 | fn build_review_prompt(agent_name: &str, bug_id: &str, bug_title: &str, fix_output: &str) -> String {
+     |                        ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_agent_name`
+
+warning: unused variable: `agent_name`
+    --> src/core/subagent.rs:1735:24
+     |
+1735 | fn build_verify_prompt(agent_name: &str, bug_id: &str, bug_title: &str) -> String {
+     |                        ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_agent_name`
+
+warning: variable `compile_ok` is assigned to, but never used
+    --> src/core/subagent.rs:1821:13
+     |
+1821 |         let mut compile_ok = false;
+     |             ^^^^^^^^^^^^^^
+     |
+     = note: consider using `_compile_ok` instead
+
+warning: unused variable: `work_dir`
+    --> src/core/subagent.rs:1982:13
+     |
+1982 |         let work_dir = if agent_name == "zhaoyun" {
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_work_dir`
+
+warning: value assigned to `compile_ok` is never read
+    --> src/core/subagent.rs:1841:21
+     |
+1841 |                     compile_ok = true;
+     |                     ^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_compile_err` is never read
+    --> src/core/subagent.rs:1822:36
+     |
+1822 |         let mut last_compile_err = String::new();
+     |                                    ^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `bug_id`
+    --> src/core/subagent.rs:2087:42
+     |
+2087 | fn count_changed_files(agent_name: &str, bug_id: &str) -> u32 {
+     |                                          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_bug_id`
+
+warning: unused variable: `desc`
+   --> src/core/zentao.rs:593:21
+    |
+593 |                 let desc = action.desc.as_deref().unwrap_or("");
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_desc`
+
+warning: unused variable: `build_out`
+   --> src/core/verification.rs:172:24
+    |
+172 | ...   let (build_ok, build_out, build_err) = run_cmd("mvn", &["package", "-DskipTests", "-q", "-pl", "openhis-application"], work_d...
+    |                      ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_build_out`
+
+warning: unused variable: `stderr`
+   --> src/core/verification.rs:185:22
+    |
+185 |     let (ok, stdout, stderr) = run_cmd("curl", &["-sk", "-o", "/dev/null", "-w", "%{http_code}", "https://localhost:8650/"], work_d...
+    |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stderr`
+
+warning: unused variable: `agent`
+   --> src/core/web_server.rs:200:17
+    |
+200 |             let agent = q.split(':').last().unwrap_or("?");
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_agent`
+
+warning: unused variable: `s`
+   --> src/core/web_server.rs:366:11
+    |
+366 |     State(s): State<Arc<AppState>>,
+    |           ^ help: if this is intentional, prefix it with an underscore: `_s`
+
+warning: unused variable: `s`
+   --> src/core/web_server.rs:817:11
+    |
+817 |     State(s): State<Arc<AppState>>,
+    |           ^ help: if this is intentional, prefix it with an underscore: `_s`
+
+warning: value assigned to `stdout` is never read
+   --> src/core/codex_exec.rs:201:22
+    |
+201 |     let mut stdout = String::new();
+    |                      ^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `stderr` is never read
+   --> src/core/codex_exec.rs:202:22
+    |
+202 |     let mut stderr = String::new();
+    |                      ^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `exit_success` is never read
+   --> src/core/codex_exec.rs:203:28
+    |
+203 |     let mut exit_success = true;
+    |                            ^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: function `parse_bug_line_full` is never used
+   --> src/core/coordinator.rs:328:4
+    |
+328 | fn parse_bug_line_full(line: &str) -> Option<(String, String)> {
+    |    ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `COORDINATOR` is never used
+  --> src/core/executor.rs:34:7
+   |
+34 | const COORDINATOR: &str = "liubei";
+   |       ^^^^^^^^^^^
+
+warning: function `degraded_verify` is never used
+    --> src/core/executor.rs:1633:10
+     |
+1633 | async fn degraded_verify(bug_id: &str, reporter: &str) -> Verdict {
+     |          ^^^^^^^^^^^^^^^
+
+warning: associated function `agent_account` is never used
+   --> src/core/zentao.rs:342:8
+    |
+108 | impl ZentaoClient {
+    | ----------------- associated function in this implementation
+...
+342 |     fn agent_account(agent_name: &str) -> &str {
+    |        ^^^^^^^^^^^^^
+
+warning: function `check_frontend_ready` is never used
+  --> src/core/verification.rs:47:4
+   |
+47 | fn check_frontend_ready() -> CheckResult {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WsEvent` is never constructed
+  --> src/core/web_server.rs:85:8
+   |
+85 | struct WsEvent { event: String, data: serde_json::Value }
+   |        ^^^^^^^
+
+warning: structure field `moduleTitle` should have a snake case name
+  --> src/core/zentao.rs:27:9
+   |
+27 |     pub moduleTitle: Option<String>,
+   |         ^^^^^^^^^^^ help: convert the identifier to snake case: `module_title`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `openedBy` should have a snake case name
+  --> src/core/zentao.rs:28:9
+   |
+28 |     pub openedBy: Option<UserInfo>,
+   |         ^^^^^^^^ help: convert the identifier to snake case: `opened_by`
+
+warning: structure field `openedDate` should have a snake case name
+  --> src/core/zentao.rs:29:9
+   |
+29 |     pub openedDate: Option<String>,
+   |         ^^^^^^^^^^ help: convert the identifier to snake case: `opened_date`
+
+warning: structure field `assignedTo` should have a snake case name
+  --> src/core/zentao.rs:30:9
+   |
+30 |     pub assignedTo: Option<UserInfo>,
+   |         ^^^^^^^^^^ help: convert the identifier to snake case: `assigned_to`
+
+warning: structure field `resolvedBy` should have a snake case name
+  --> src/core/zentao.rs:31:9
+   |
+31 |     pub resolvedBy: Option<UserInfo>,
+   |         ^^^^^^^^^^ help: convert the identifier to snake case: `resolved_by`
+
+warning: structure field `productName` should have a snake case name
+  --> src/core/zentao.rs:35:9
+   |
+35 |     pub productName: Option<String>,
+   |         ^^^^^^^^^^^ help: convert the identifier to snake case: `product_name`
+
+warning: structure field `projectName` should have a snake case name
+  --> src/core/zentao.rs:36:9
+   |
+36 |     pub projectName: Option<String>,
+   |         ^^^^^^^^^^^ help: convert the identifier to snake case: `project_name`
+
+warning: structure field `activatedCount` should have a snake case name
+  --> src/core/zentao.rs:40:9
+   |
+40 |     pub activatedCount: Option<i32>,
+   |         ^^^^^^^^^^^^^^ help: convert the identifier to snake case: `activated_count`
+
+warning: structure field `fieldName` should have a snake case name
+  --> src/core/zentao.rs:75:9
+   |
+75 |     pub fieldName: Option<String>,
+   |         ^^^^^^^^^ help: convert the identifier to snake case: `field_name`
+
+warning: structure field `moduleTitle` should have a snake case name
+  --> src/core/zentao.rs:93:9
+   |
+93 |     pub moduleTitle: Option<String>,
+   |         ^^^^^^^^^^^ help: convert the identifier to snake case: `module_title`
+
+warning: structure field `openedDate` should have a snake case name
+  --> src/core/zentao.rs:94:9
+   |
+94 |     pub openedDate: Option<String>,
+   |         ^^^^^^^^^^ help: convert the identifier to snake case: `opened_date`
+
+warning: structure field `assignedTo` should have a snake case name
+  --> src/core/zentao.rs:95:9
+   |
+95 |     pub assignedTo: Option<UserInfo>,
+   |         ^^^^^^^^^^ help: convert the identifier to snake case: `assigned_to`
+
+## 禅道 Bug #710：[住院护士站-汇总领药] 左侧患者树过滤功能失效：勾选特定患者后，右侧汇总列表未按患者进行联动筛选
+
+- 严重程度：3 (一般)
+- 优先级：3
+- 类型：codeerror
+- 状态：active
+- 所属模块：病区护士工作站
+- 所属产品：开源HIS改造落地
+- 创建者：陈显精（2026-06-08T09:44:32Z）
+- 当前指派人：冉芸侨
+
+### 重现步骤
+【步骤】图1图2如上图1、2所示：登录账号：wx 密码：123456登录 系统，进入【住院护士站】，切换至【汇总领药】页签，当前科室下有多名患者通过申请，且汇总列表内已加载多条数据。。在左侧【床位/患者列表】树中，观察默认状态下右侧显示的汇总数据（为全科室数据）。在左侧树中勾选其中一名具体患者（例如：“010 / 刘潇凡”）。观察右侧“汇总领药”数据列表是否存在数据筛选变化，或点击上方【查询】按钮触发刷新。【结果】尽管在左侧勾选了具体患者，但右侧数据列表并未发生任何变化，依然展示全员的领药汇总单，无法实现患者维度的数据拆分与筛选。【期望】左侧患者树应与右侧数据列表联动：勾选某一名患者时，右侧列表应自动（或点击查询后）仅展示该名患者名下的领药汇总明细；取消勾选后应恢复展示全部。
+
+### 操作历史
+- 陈显精 2026-06-08 17:44:32 [创建]
+- 张飞 2026-06-09 11:59:30 [解决]
+      Bug状态: 激活 → 已解决
+      是否确认: 未确认 → 已确认
+      解决版本:  → trunk
+      解决方案:  → 已解决
+      解决者:  → 张飞
+      解决日期:  → 2026-06-09 11:59:29
+      指派给: 王建 → 
+  备注：[🤖 诸葛亮分析] Bug #710 路由决策
+
+                    分析结果：无数据库变更，直接进入测试
+                    修复智能体：guanyu。
+                    需要DB审查：false
+                    路由目标：zhangfei
+- 张飞 2026-06-09 14:32:49 [edited]
+      指派给:  → 陈显精
+- 张飞 2026-06-09 14:39:14 [激活]
+      指派给: 陈显精 → 张飞
+      影响版本: 7 → 6
+      激活时间:  → 2026-06-09 14:39:14
+      解决方案: 已解决 → 
+      Bug状态: 已解决 → 激活
+      解决者: 张飞 → 
+      解决版本: trunk → 
+      激活次数: 0 → 1
+      解决日期: 2026-06-09 11:59:29 → 
+- admin 2026-06-09 15:05:36 [指派]
+      指派给: 张飞 → 冉芸侨
+
+

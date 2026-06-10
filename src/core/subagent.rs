@@ -1082,6 +1082,44 @@ fn query_bug_details(bug_id: &str) -> String {
 /// - 结构化字段：severity/pri/module/steps/actions
 /// - 操作历史（谁在什么时候做了什么）
 /// - 纯文本步骤提取（去除 HTML 标签保留文字）
+/// Extract fileIDs from raw_steps_html (HTML tags contain fileID=xxx)
+fn extract_file_ids_from_html(html: &str) -> Vec<String> {
+    let mut file_ids: Vec<String> = Vec::new();
+    let mut pos = 0;
+    while let Some(idx) = html[pos..].find("fileID=") {
+        let start = pos + idx + 7;
+        let mut end = start;
+        while end < html.len() && html.as_bytes()[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start {
+            file_ids.push(html[start..end].to_string());
+        }
+        pos = end;
+    }
+    file_ids
+}
+
+/// Download a Zentao file attachment by fileID, returns raw bytes
+async fn download_zentao_image(cfg: &crate::config::Config, fid: &str) -> anyhow::Result<Vec<u8>> {
+    let token = std::fs::read_to_string("/root/.config/zentao/.env")
+        .ok()
+        .and_then(|c| {
+            c.lines()
+                .find(|l| l.starts_with("ZENTAO_TOKEN="))
+                .map(|l| l.strip_prefix("ZENTAO_TOKEN=").unwrap_or("").trim().to_string())
+        })
+        .unwrap_or_default();
+    let url = format!("{}/api.php/v1/files/{}", cfg.zentao.base_url.trim_end_matches('/'), fid);
+    let client = reqwest::Client::new();
+    let resp = client.get(&url)
+        .header("Token", token)
+        .send()
+        .await?;
+    let bytes = resp.bytes().await?.to_vec();
+    Ok(bytes)
+}
+
 fn query_bug_details_v2(bug_id: &str) -> String {
     // 在已有 tokio 运行时上下文中执行 async 调用
     let rt_handle = tokio::runtime::Handle::try_current();
@@ -1098,9 +1136,38 @@ fn query_bug_details_v2(bug_id: &str) -> String {
                 let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
                 match client.get_bug(bug_id).await {
                     Ok(detail) => {
-                        let text = detail.format_for_prompt();
+                        let mut text = detail.format_for_prompt();
                         tracing::info!("Zentao v2: Bug #{} detail fetched ({})", bug_id,
                             text.lines().count());
+
+                        // ── Vision 多模态分析：从 raw_steps_html 提取图片 ──
+                        let file_ids = extract_file_ids_from_html(&detail.raw_steps_html);
+                        if !file_ids.is_empty() {
+                            tracing::info!("Bug #{} 发现 {} 张附图，尝试 Vision 分析", bug_id, file_ids.len());
+                            let mut images: Vec<Vec<u8>> = Vec::new();
+                            for fid in &file_ids {
+                                if let Ok(bytes) = download_zentao_image(&cfg, fid).await {
+                                    if bytes.len() > 100 {
+                                        images.push(bytes);
+                                    }
+                                }
+                            }
+                            if !images.is_empty() {
+                                let llm = crate::core::llm::LlmClient::from_config(&cfg);
+                                let system = "你是 HIS 系统的 Bug 分析专家。根据禅道截图与文本信息，输出可执行修复要点。";
+                                let user = format!("以下是 Bug 信息与附件截图。请结合截图识别关键界面问题，并给出修复优先级与前端改动建议。\n\n{}", text);
+                                match llm.vision(system, &user, &images, Some(&llm.vision_model), None, Some(2048)).await {
+                                    Ok(vision_ans) => {
+                                        text.push_str("\n\n### Vision 多模态分析\n");
+                                        text.push_str(&vision_ans);
+                                        tracing::info!("Bug #{} Vision 分析完成（{} 张图）", bug_id, images.len());
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Bug #{} Vision 分析失败，回退纯文本: {}", bug_id, e);
+                                    }
+                                }
+                            }
+                        }
                         Some(text)
                     }
                     Err(e) => {

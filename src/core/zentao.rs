@@ -505,7 +505,7 @@ impl BugDetail {
                 if !zentao_token.is_empty() {
                     // 简单提取 fileID（不用 regex）
                     let mut file_ids: Vec<String> = Vec::new();
-                    let steps_str = self.steps.clone();
+                    let steps_str = self.raw_steps_html.clone();
                     let mut pos = 0;
                     while let Some(idx) = steps_str[pos..].find("fileID=") {
                         let start = pos + idx + 7;
