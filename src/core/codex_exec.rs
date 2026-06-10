@@ -212,6 +212,7 @@ pub fn codex_exec(
     let stdout_clone = std::sync::Arc::clone(&stdout_buf);
     let stderr_clone = std::sync::Arc::clone(&stderr_buf);
     let activity_clone = std::sync::Arc::clone(&last_activity);
+    let activity_clone2 = std::sync::Arc::clone(&last_activity);
 
     let _stdout_thread = std::thread::spawn(move || {
         use std::io::Read;
@@ -244,6 +245,10 @@ pub fn codex_exec(
                         if let Ok(mut guard) = stderr_clone.lock() {
                             guard.extend_from_slice(&buf[..n]);
                         }
+                        // stderr 也有输出，说明进程活跃
+                        if let Ok(mut guard) = activity_clone2.lock() {
+                            *guard = Instant::now();
+                        }
                     }
                     Err(_) => break,
                 }
@@ -252,7 +257,7 @@ pub fn codex_exec(
     });
 
     // 停滞检测：无新输出超过 300 秒（5 分钟）则杀进程
-    let stall_timeout = std::time::Duration::from_secs(300);
+    let stall_timeout = std::time::Duration::from_secs(600);
 
     loop {
         match child.try_wait() {
