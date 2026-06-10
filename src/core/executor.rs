@@ -93,6 +93,21 @@ impl AgentExecutor {
                 tracing::info!("[{}] Cleaning up stale lock on startup (TTL={}s)", self.agent_id, ttl);
                 let _: redis::RedisResult<()> = self.redis.clone().del(&lock_key).await;
             }
+            // 启动时清理残留的 fix_active 去重标记（旧进程已死，锁无意义）
+            let pattern = format!("fix_active:{}:*", self.agent_id);
+            let mut cursor: u64 = 0;
+            loop {
+                let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor).arg("MATCH").arg(&pattern).arg("COUNT").arg(100)
+                    .query_async(&mut self.redis.clone()).await.unwrap_or((0, vec![]));
+                for key in &keys {
+                    let _: redis::RedisResult<()> = self.redis.clone().del(key).await;
+                    tracing::info!("[{}] Cleaned stale fix_active key: {}", self.agent_id, key);
+                }
+                cursor = new_cursor;
+                if cursor == 0 { break; }
+            }
+
             // 启动恢复：检查失败集合中是否有可重试的 bug
             self.recover_failed_bugs().await;
         }

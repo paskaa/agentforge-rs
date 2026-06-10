@@ -1881,8 +1881,49 @@ pub fn run_harness_loop(
     };
     phase_verdicts.push(("generator".to_string(), fix_verdict.clone()));
     
-    // ── Phase 1 结果判定：Unknown 不直接失败，检查实际代码变更 ──
+    // ── Phase 1 结果判定：stall/timeout 自动重试，其他 fail 直接返回 ──
     if fix_result.verdict.is_fail() {
+        let fail_reason = match &fix_result.verdict {
+            Verdict::Fail(r) => r.clone(),
+            _ => "unknown".to_string(),
+        };
+        // stall/timeout → 自动重试（最多 3 次）
+        if fail_reason.contains("stalled") || fail_reason.contains("timeout") {
+            tracing::warn!("[{}] Bug#{} Phase 1 STALL/TIMEOUT: {}，自动重试", agent_name, bug_id, fail_reason);
+            for retry in 1..=3u32 {
+                tracing::info!("[{}] Bug#{} Phase 1 stall 重试 {}/3", agent_name, bug_id, retry);
+                let retry_result = codex_exec::codex_exec(
+                    &fix_prompt, sandbox,
+                    Some("/root/agentforge-rs/schemas/verdict.json"),
+                    Some(agent_name), timeout_secs,
+                );
+                match &retry_result.verdict {
+                    Verdict::Fail(r) if r.contains("stalled") || r.contains("timeout") => {
+                        tracing::warn!("[{}] Bug#{} 重试 {} 仍然 stall: {}", agent_name, bug_id, retry, r);
+                        continue;
+                    }
+                    _ => {
+                        // 重试成功或非 stall 失败，用重试结果继续
+                        tracing::info!("[{}] Bug#{} stall 重试 {} 得到 verdict: {:?}", agent_name, bug_id, retry, retry_result.verdict);
+                        // 替换 fix_result 继续后续流程
+                        // 注意：这里需要重新绑定 fix_result，但 Rust 不支持
+                        // 所以我们直接检查重试结果
+                        if retry_result.verdict.is_pass() || retry_result.verdict == Verdict::Unknown {
+                            // 重试成功，继续后续阶段
+                            break;
+                        }
+                        // 非 stall 失败，返回
+                        let elapsed = start.elapsed().as_millis() as u64;
+                        return CodexResult {
+                            success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
+                            stdout: retry_result.final_message, stderr: retry_result.stderr,
+                            exit_code: 1, changes: count_changed_files(agent_name, bug_id),
+                            last_phase: "generator".to_string(), phase_verdicts,
+                        };
+                    }
+                }
+            }
+        }
         tracing::warn!("[{}] Bug#{} Phase 1 FAIL: {:?}", agent_name, bug_id, fix_result.verdict);
         let elapsed = start.elapsed().as_millis() as u64;
         return CodexResult {

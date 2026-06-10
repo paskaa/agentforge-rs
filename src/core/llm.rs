@@ -189,6 +189,11 @@ impl LlmClient {
     ) -> anyhow::Result<String> {
         let model = model.unwrap_or(&self.vision_model);
         let url = format!("{}/chat/completions", self.api_base);
+        // Vision 请求图片多、响应慢，使用 120 秒超时
+        let vision_client = Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| self.client.clone());
 
         let mut user_parts = vec![VisionContent::Text { text: text.to_string() }];
         for image in images {
@@ -219,8 +224,7 @@ impl LlmClient {
 
         let mut last_err = None;
         for attempt in 0..3 {
-            match self
-                .client
+            match vision_client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .json(&body)

@@ -203,21 +203,66 @@ pub fn codex_exec(
     let mut exit_success = true;
     let elapsed_ms;
 
+    // 增量读取 stdout 的分离线程
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let last_activity = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let stdout_clone = std::sync::Arc::clone(&stdout_buf);
+    let stderr_clone = std::sync::Arc::clone(&stderr_buf);
+    let activity_clone = std::sync::Arc::clone(&last_activity);
+
+    let _stdout_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        if let Some(mut pipe) = stdout_pipe {
+            let mut buf = [0u8; 4096];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut guard) = stdout_clone.lock() {
+                            guard.extend_from_slice(&buf[..n]);
+                        }
+                        if let Ok(mut guard) = activity_clone.lock() {
+                            *guard = Instant::now();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    let _stderr_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        if let Some(mut pipe) = stderr_pipe {
+            let mut buf = [0u8; 4096];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut guard) = stderr_clone.lock() {
+                            guard.extend_from_slice(&buf[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    // 停滞检测：无新输出超过 300 秒（5 分钟）则杀进程
+    let stall_timeout = std::time::Duration::from_secs(300);
+
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                use std::io::Read;
-                let mut so = Vec::new();
-                let mut se = Vec::new();
-                let _ = child.stdout.take().map(|mut r| r.read_to_end(&mut so));
-                let _ = child.stderr.take().map(|mut r| r.read_to_end(&mut se));
-                stdout = String::from_utf8_lossy(&so).to_string();
-                stderr = String::from_utf8_lossy(&se).to_string();
-                exit_success = _status.success();
+            Ok(Some(status)) => {
+                exit_success = status.success();
                 elapsed_ms = start.elapsed().as_millis() as u64;
                 break;
             }
             Ok(None) => {
+                // 检查总体超时
                 if !no_timeout && start.elapsed() > timeout_duration {
                     tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex", timeout_secs);
                     let _ = child.kill();
@@ -228,6 +273,25 @@ pub fn codex_exec(
                         events: vec![], total_tokens: 0,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         stderr: format!("codex timed out after {}s", timeout_secs),
+                    };
+                }
+                // 检查停滞：有输出活动则不杀
+                let idle = if let Ok(guard) = last_activity.lock() {
+                    guard.elapsed()
+                } else {
+                    stall_timeout // 保守处理
+                };
+                if idle > stall_timeout {
+                    tracing::warn!("[codex_exec] STALLED — no output for {}s, killing codex (elapsed={}s)",
+                        idle.as_secs(), start.elapsed().as_secs());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return CodexExecResult {
+                        success: false, final_message: String::new(),
+                        verdict: Verdict::Fail(format!("stalled — no output for {}s", idle.as_secs())),
+                        events: vec![], total_tokens: 0,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        stderr: format!("codex stalled — no output for {}s", idle.as_secs()),
                     };
                 }
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -243,6 +307,10 @@ pub fn codex_exec(
             }
         }
     }
+
+    // 从缓冲区读取 stdout/stderr
+    stdout = stdout_buf.lock().map(|g| String::from_utf8_lossy(&g).to_string()).unwrap_or_default();
+    stderr = stderr_buf.lock().map(|g| String::from_utf8_lossy(&g).to_string()).unwrap_or_default();
 
 
     // 解析 JSONL 事件流
