@@ -157,6 +157,8 @@ pub fn codex_exec(
        .arg("--sandbox").arg(sandbox)
        .arg("--dangerously-bypass-approvals-and-sandbox")
        .arg("--json");
+    // 禁用远程插件同步（避免 chatgpt 认证 hang）
+    cmd.env("CODEX_DISABLE_REMOTE_SYNC", "1");
 
     // 添加 agent 角色上下文
     let full_task = if let Some(agent) = agent_name {
