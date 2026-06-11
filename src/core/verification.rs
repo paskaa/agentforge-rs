@@ -108,7 +108,7 @@ fn check_compile(agent_name: &str, work_dir: &str) -> CheckResult {
     }
     
     // 后端: mvn compile
-    let (ok, stdout, stderr) = run_cmd("mvn", &["clean", "compile", "-q", "-pl", "openhis-application", "-am"], work_dir, 180);
+    let (ok, stdout, stderr) = run_cmd("mvn", &["clean", "compile", "-q", "-pl", "healthlink-his-application", "-am"], work_dir, 180);
     CheckResult {
         name: "编译验证(mvn compile)".into(),
         passed: ok,
@@ -163,13 +163,13 @@ fn check_unit_test(agent_name: &str, work_dir: &str) -> CheckResult {
     }
     
     // 后端: mvn test — 先检查 jar 是否存在，不存在则尝试构建
-    let jar_path = format!("{}/openhis-application/target/openhis-application.jar", work_dir);
+    let jar_path = format!("{}/healthlink-his-application/target/healthlink-his-application.jar", work_dir);
     let jar_exists = std::path::Path::new(&jar_path).exists();
     
     if !jar_exists {
         // 尝试构建 jar
         tracing::info!("[verification] jar 不存在，尝试 mvn package -DskipTests...");
-        let (build_ok, build_out, build_err) = run_cmd("mvn", &["package", "-DskipTests", "-q", "-pl", "openhis-application"], work_dir, 300);
+        let (build_ok, build_out, build_err) = run_cmd("mvn", &["package", "-DskipTests", "-q", "-pl", "healthlink-his-application"], work_dir, 300);
         if !build_ok {
             let err_msg = if build_err.len() > 300 { build_err.chars().take(300).collect() } else { build_err };
             return CheckResult {
@@ -195,7 +195,7 @@ fn check_unit_test(agent_name: &str, work_dir: &str) -> CheckResult {
     }
     
     // 后端可达，运行 mvn test
-    let (ok, stdout, stderr) = run_cmd("mvn", &["test", "-q", "-pl", "openhis-application",
+    let (ok, stdout, stderr) = run_cmd("mvn", &["test", "-q", "-pl", "healthlink-his-application",
         "-Dtest=com.openhis.MedicationApplicationTests",
         "-DfailIfNoTests=false"], work_dir, 180);
     CheckResult {

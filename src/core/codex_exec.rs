@@ -87,6 +87,13 @@ pub struct CodexExecResult {
 
 /// 从输出中解析 VERDICT
 pub fn parse_verdict(output: &str) -> Verdict {
+    // ── 0. 空输出直接判 FAIL ──
+    if output.trim().len() < 20 {
+        tracing::warn!("[parse_verdict] Output too short ({} bytes) → FAIL", output.trim().len());
+        return Verdict::Fail("empty or near-empty output".into());
+    }
+
+    // ── 1. 显式 VERDICT 标记（优先级最高）──
     for line in output.lines() {
         let line = line.trim();
         if line.contains("VERDICT:") || line.contains("VERDICT：") {
@@ -112,26 +119,68 @@ pub fn parse_verdict(output: &str) -> Verdict {
         }
     }
 
-    // ── 启发式容错：codex 可能不输出 VERDICT 标记 ──
+    // ── 2. 启发式容错（mimo-v2.5 经常不输出 VERDICT 标记）──
     let lower = output.to_lowercase();
-    let has_fix_evidence = lower.contains("修复") || lower.contains("修改了")
-        || lower.contains("fixed") || lower.contains("applied")
-        || lower.contains("patch") || lower.contains("已修复")
-        || lower.contains("编译通过") || lower.contains("build success")
-        || lower.contains("compile success");
-    let has_error_evidence = lower.contains("error:") || lower.contains("panic:")
-        || lower.contains("编译失败") || lower.contains("build failed")
-        || lower.contains("exception") || lower.contains("npe");
 
-    if has_fix_evidence && !has_error_evidence {
-        tracing::info!("[parse_verdict] Heuristic PASS (no VERDICT marker but fix evidence found)");
-        Verdict::Pass
-    } else if has_error_evidence && !has_fix_evidence {
-        tracing::info!("[parse_verdict] Heuristic FAIL (no VERDICT marker, error evidence found)");
-        Verdict::Fail("heuristic: error evidence in output".into())
-    } else {
-        Verdict::Unknown
+    // 修复证据（大幅扩充关键词）
+    let fix_keywords = [
+        "修复", "修改了", "已修改", "已修复", "已更正", "已解决",
+        "fixed", "applied", "patched", "resolved", "corrected",
+        "编译通过", "build success", "compile success", "build ok",
+        "vite build", "mvn compile", "变更摘要", "变更文件",
+        "fix(#", "fix(", "git commit", "git add",
+        "修改内容", "修复方案", "修复完成", "successfully",
+    ];
+    let has_fix_evidence = fix_keywords.iter().any(|k| lower.contains(k));
+
+    // 错误证据（排除已在修复上下文中出现的 error）
+    let error_keywords = [
+        "panic:", "编译失败", "build failed", "fatal error",
+        "stack overflow", "out of memory", "oom",
+    ];
+    // 弱错误信号（可能出现在正常修复日志中，需要结合上下文）
+    let weak_error_keywords = [
+        "error:", "exception", "npe", "nullpointer",
+    ];
+    let has_strong_error = error_keywords.iter().any(|k| lower.contains(k));
+    let has_weak_error = weak_error_keywords.iter().any(|k| lower.contains(k));
+
+    // 判定逻辑：
+    // - 有修复证据 + 无强错误 → PASS（即使有弱错误，因为修复过程中看到 error 日志是正常的）
+    // - 有修复证据 + 有强错误 → 看最后一段输出是否有错误（最近的输出优先）
+    // - 无修复证据 + 有错误 → FAIL
+    // - 都没有 → Unknown
+    if has_fix_evidence && !has_strong_error {
+        tracing::info!("[parse_verdict] Heuristic PASS (fix evidence found, no strong errors)");
+        return Verdict::Pass;
     }
+    if has_fix_evidence && has_strong_error {
+        // 检查最后 500 字符是否有强错误（最近的输出优先）
+        let tail = output.chars().rev().take(500).collect::<String>().to_lowercase();
+        let tail_has_error = error_keywords.iter().any(|k| tail.contains(k));
+        if !tail_has_error {
+            tracing::info!("[parse_verdict] Heuristic PASS (fix evidence found, errors only in early output)");
+            return Verdict::Pass;
+        }
+        tracing::warn!("[parse_verdict] Ambiguous: fix evidence + strong error in tail → UNKNOWN");
+        return Verdict::Unknown;
+    }
+    if has_strong_error || (has_weak_error && !has_fix_evidence) {
+        tracing::info!("[parse_verdict] Heuristic FAIL (error evidence found, no fix evidence)");
+        return Verdict::Fail("heuristic: error evidence in output".into());
+    }
+
+    // ── 3. 最后手段：检查是否有代码变更痕迹 ──
+    let has_code_change = lower.contains("@@ -") || lower.contains("diff --git")
+        || lower.contains(">>>>") || lower.contains("<<<<")
+        || lower.contains("git diff") || lower.contains("git status");
+    if has_code_change {
+        tracing::info!("[parse_verdict] Heuristic PASS (code change patterns found in output)");
+        return Verdict::Pass;
+    }
+
+    tracing::warn!("[parse_verdict] No clear signal → UNKNOWN");
+    Verdict::Unknown
 }
 
 /// 执行 codex exec 命令
@@ -199,7 +248,9 @@ pub fn codex_exec(
     };
 
     let no_timeout = timeout_secs == 0;
-    let timeout_duration = if no_timeout { std::time::Duration::from_secs(u64::MAX) } else { std::time::Duration::from_secs(timeout_secs) };
+    // 铁律: 即使 timeout_secs=0，硬上限 1800s（30 分钟）
+    let effective_timeout = if no_timeout { 1800 } else { timeout_secs };
+    let timeout_duration = std::time::Duration::from_secs(effective_timeout);
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_success = true;
@@ -258,8 +309,9 @@ pub fn codex_exec(
         }
     });
 
-    // 停滞检测：无新输出超过 300 秒（5 分钟）则杀进程
-    let stall_timeout = std::time::Duration::from_secs(600);
+    // 停滞检测：无新输出超过 480 秒（8 分钟）则杀进程
+    // 总上限通过 timeout_secs 控制（默认 1800s = 30 分钟）
+    let stall_timeout = std::time::Duration::from_secs(480);
 
     loop {
         match child.try_wait() {
@@ -270,16 +322,16 @@ pub fn codex_exec(
             }
             Ok(None) => {
                 // 检查总体超时
-                if !no_timeout && start.elapsed() > timeout_duration {
-                    tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex", timeout_secs);
+                if start.elapsed() > timeout_duration {
+                    tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex", effective_timeout);
                     let _ = child.kill();
                     let _ = child.wait();
                     return CodexExecResult {
                         success: false, final_message: String::new(),
-                        verdict: Verdict::Fail(format!("timeout after {}s", timeout_secs)),
+                        verdict: Verdict::Fail(format!("timeout after {}s", effective_timeout)),
                         events: vec![], total_tokens: 0,
                         elapsed_ms: start.elapsed().as_millis() as u64,
-                        stderr: format!("codex timed out after {}s", timeout_secs),
+                        stderr: format!("codex timed out after {}s", effective_timeout),
                     };
                 }
                 // 检查停滞：有输出活动则不杀
@@ -299,6 +351,56 @@ pub fn codex_exec(
                         events: vec![], total_tokens: 0,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         stderr: format!("codex stalled — no output for {}s", idle.as_secs()),
+                    };
+                }
+                // ── 推理重复检测：mimo-v2.5 可能陷入推理死循环 ──
+                // 检查 stdout（reasoning JSONL）和 stderr 中是否有重复模式
+                let loop_detected = {
+                    let mut detected = false;
+                    // 检查 stdout（reasoning 通过 JSONL 的 text 字段输出）
+                    if let Ok(guard) = stdout_buf.try_lock() {
+                        let s = String::from_utf8_lossy(&guard);
+                        let len = s.len();
+                        if len > 3000 {
+                            let tail_start = if len > 2000 { len - 2000 } else { 0 };
+                            let tail = &s[tail_start..];
+                            let spent = tail.matches("I've spent").count();
+                            let apply = tail.matches("apply a fix now").count();
+                            let too_long = tail.matches("too long on this").count();
+                            if spent >= 3 || apply >= 3 || too_long >= 3 {
+                                tracing::warn!("[codex_exec] stdout 推理死循环: spent={} apply={}", spent, apply);
+                                detected = true;
+                            }
+                        }
+                    }
+                    // 检查 stderr
+                    if !detected {
+                        if let Ok(guard) = stderr_buf.try_lock() {
+                            let s = String::from_utf8_lossy(&guard);
+                            let len = s.len();
+                            if len > 2000 {
+                                let tail_start = if len > 1500 { len - 1500 } else { 0 };
+                                let tail = &s[tail_start..];
+                                let spent = tail.matches("I've spent").count();
+                                let apply = tail.matches("apply a fix now").count();
+                                if spent >= 3 || apply >= 3 {
+                                    tracing::warn!("[codex_exec] stderr 推理死循环: spent={} apply={}", spent, apply);
+                                    detected = true;
+                                }
+                            }
+                        }
+                    }
+                    detected
+                };
+                if loop_detected {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return CodexExecResult {
+                        success: false, final_message: String::new(),
+                        verdict: Verdict::Fail("reasoning loop detected".into()),
+                        events: vec![], total_tokens: 0,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        stderr: "mimo reasoning loop: repeated reasoning detected".into(),
                     };
                 }
                 std::thread::sleep(std::time::Duration::from_secs(5));

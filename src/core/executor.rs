@@ -159,6 +159,7 @@ impl AgentExecutor {
 
             match source {
                 "pm_analyze" if self.agent_id == "liubei" => self.handle_pm_analyze(msg).await,
+                "pipeline_pre_analyze" if self.agent_id == "zhugeliang" => self.handle_pipeline_pre_analyze(msg).await,
                 "pipeline_analyze" if self.agent_id == "zhugeliang" => self.handle_pipeline_analyze(msg).await,
                 "pipeline_db_review" if self.agent_id == "xunyu" => self.handle_pipeline_db_review(msg).await,
                 "pipeline_report" if self.agent_id == "liubei" => self.handle_pipeline_report(msg).await,
@@ -1287,6 +1288,233 @@ impl AgentExecutor {
     /// Hermes bridge auto-executes fast pipeline actions (scan_bugs, query_bug)
     /// and formulates the final reply. Long actions (fix_bug) are submitted async.
 
+
+    /// 诸葛亮预分析：获取 Bug 详情，分析根因，设计修复方案，路由给修复 Agent
+    async fn handle_pipeline_pre_analyze(&self, msg: &str) {
+        let bid = pipeline::extract_bug_id(msg);
+        if bid.is_empty() {
+            tracing::warn!("[zhugeliang] pipeline_pre_analyze: 无法提取 Bug ID");
+            return;
+        }
+
+        // 提取建议的修复 Agent
+        let suggested_fixer = msg.lines()
+            .filter_map(|l| {
+                if l.contains("建议修复 Agent:") {
+                    l.split(':').nth(1).map(|s| s.trim().to_string())
+                } else { None }
+            })
+            .next()
+            .unwrap_or_else(|| "guanyu".to_string());
+
+        tracing::info!("[zhugeliang] 🔍 预分析 Bug #{} (建议修复 Agent: {})", bid, suggested_fixer);
+
+        // Step 1: 获取 Bug 详情
+        let cfg = crate::config::Config::load().ok();
+        let (bug_title, bug_steps, bug_module, _reporter) = if let Some(ref cfg) = cfg {
+            let client = crate::core::zentao::ZentaoClient::from_config(cfg);
+            match client.get_bug(&bid).await {
+                Ok(detail) => {
+                    let title = detail.title.clone();
+                    let steps = detail.steps.clone();
+                    let module = detail.module_title.clone();
+                    let reporter = detail.opened_by.clone();
+                    (title, steps, module, reporter)
+                }
+                Err(e) => {
+                    tracing::warn!("[zhugeliang] 获取 Bug #{} 详情失败: {}", bid, e);
+                    (String::new(), String::new(), String::new(), String::new())
+                }
+            }
+        } else {
+            (String::new(), String::new(), String::new(), String::new())
+        };
+
+        // Step 2: 分析 Bug 类型，决定修复 Agent
+        let combined = format!("{} {} {}", bug_title, bug_steps, bug_module).to_lowercase();
+
+        // 前端关键词
+        let frontend_kw = ["vue", "前端", "界面", "页面", "ui", "按钮", "样式", "css", "下拉框",
+            "弹窗", "列表", "表格", "表单", "布局", "显示", "回显", "回填", "加载卡死",
+            "检索", "搜索框", "组件", "路由", "菜单", "标签", "页签", "分页", "图标",
+            "前端", "javascript", "ts ", "typescript", "vite", "npm", "element"];
+        // 后端关键词
+        let backend_kw = ["java", "spring", "controller", "service", "mapper", "mybatis", "sql",
+            "数据库", "api", "接口", "null", "npe", "exception", "error", "编译",
+            "maven", "pom", "后端", "server", "repository", "dao", "entity", "dto",
+            "事务", "transaction", "session", "redis", "缓存", "cache"];
+        // 数据库关键词
+        let db_kw = ["ddl", "dml", "alter table", "create table", "drop table", "column",
+            "字段", "迁移", "migration", "schema", "索引", "index", "constraint"];
+
+        let is_frontend = frontend_kw.iter().any(|kw| combined.contains(kw));
+        let is_backend = backend_kw.iter().any(|kw| combined.contains(kw));
+        let is_db = db_kw.iter().any(|kw| combined.contains(kw));
+
+        // 决策逻辑：优先使用关键词分析，其次使用建议
+        let (target_fixer, reason) = if is_db && !is_frontend {
+            ("xunyu", "涉及数据库 DDL 变更，路由给荀彧".to_string())
+        } else if is_frontend && !is_backend {
+            ("zhaoyun", "前端/界面相关问题，路由给赵云".to_string())
+        } else if is_backend && !is_frontend {
+            ("guanyu", "后端/Java 相关问题，路由给关羽".to_string())
+        } else if is_frontend && is_backend {
+            // 前后端都涉及，根据标题权重决定主修复 Agent
+            let frontend_score = frontend_kw.iter().filter(|kw| combined.contains(*kw)).count();
+            let backend_score = backend_kw.iter().filter(|kw| combined.contains(*kw)).count();
+            if frontend_score > backend_score {
+                ("zhaoyun", format!("前后端都涉及，前端权重更高({} vs {})，路由给赵云", frontend_score, backend_score))
+            } else {
+                ("guanyu", format!("前后端都涉及，后端权重更高({} vs {})，路由给关羽", backend_score, frontend_score))
+            }
+        } else {
+            // 无法判断，使用建议的修复 Agent
+            (suggested_fixer.as_str(), format!("无法自动判断类型，使用建议修复 Agent: {}", suggested_fixer))
+        };
+
+        tracing::info!("[zhugeliang] Bug #{} 分析结果: {} → {}", bid, reason, target_fixer);
+
+        // Step 3: 生成分析报告（作为修复 Agent 的上下文）
+        let analysis_report = format!(
+            "## 诸葛亮分析报告 — Bug #{}\n\n\
+             ### Bug 信息\n\
+             - **标题**: {}\n\
+             - **模块**: {}\n\
+             - **涉及页面/步骤**: {}\n\n\
+             ### 路由决策\n\
+             - **目标修复 Agent**: {}\n\
+             - **决策原因**: {}\n\n\
+             ### 修复建议\n\
+             1. 先读 AGENTS.md 了解项目规范\n\
+             2. 分析全链路数据流（前端→Controller→Service→Mapper→DB）\n\
+             3. 定位根因后实施最小化修复\n\
+             4. 修复后运行编译验证（后端: mvn compile / 前端: npm run build）\n\
+             5. 确保无回归问题后提交",
+            bid, bug_title, bug_module, bug_steps.chars().take(200).collect::<String>(),
+            target_fixer, reason
+        );
+
+        // Step 4: 创建交接卡
+        let handoff = HandoffCard::new(&bid, "", &_reporter, "zhugeliang", target_fixer, "pre_analyze");
+        handoff.save(&mut self.redis.clone()).await;
+
+        // Step 5: 发送流水线事件
+        let event = PipelineEvent::Handoff {
+            bug_id: bid.clone(),
+            from: "zhugeliang".into(),
+            to: target_fixer.into(),
+            stage: "pre_analyze".into(),
+        };
+        self.publish_trace("pipeline", "handoff", &format!("Bug#{}", bid), &event.to_json(), "ok", 0).await;
+
+        // Step 6: 路由给修复 Agent，附带分析报告
+        let fix_task = serde_json::json!({
+            "agent_id": target_fixer,
+            "message": format!("请修复 Bug #{}。\n\n{}", bid, analysis_report),
+            "source": "pipeline",
+            "sender_id": "zhugeliang",
+            "bug_reporter": _reporter,
+            "msg_id": format!("pipeline-fix-{}-{}", bid, chrono::Local::now().timestamp()),
+            "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "chat_id": "", "is_dm": "true",
+        });
+
+        let queue = format!("agent-work-queue:fix:{}", target_fixer);
+        let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, fix_task.to_string()).await;
+
+        tracing::info!("[zhugeliang] ✅ Bug #{} 已路由给 {} 执行修复", bid, target_fixer);
+        let _ = self.feishu.send(&format!("🔍 诸葛亮分析 Bug #{} → {} ({})", bid, target_fixer, reason), None).await;
+
+        // Step 7: 留档 — 保存完整分析报告到本地文件
+        let analysis_dir = std::path::PathBuf::from("/root/agentforge-rs/docs/bug-analyses");
+        let _ = std::fs::create_dir_all(&analysis_dir);
+        let archive_path = analysis_dir.join(format!("bug-{}.md", bid));
+        let archive_content = format!(
+            "# 诸葛亮分析报告 — Bug #{}
+
+             **分析时间**: {}
+             **Bug 标题**: {}
+             **模块**: {}
+             **提出人**: {}
+
+             ---
+
+             ## Bug 描述
+
+{}
+
+             ---
+
+             ## 路由决策
+
+             - **目标修复 Agent**: {}
+             - **决策原因**: {}
+             - **关键词匹配**: 前端={} / 后端={} / 数据库={}
+
+             ---
+
+             ## 修复建议
+
+             1. 先读 AGENTS.md 了解项目规范
+             2. 分析全链路数据流（前端→Controller→Service→Mapper→DB）
+             3. 定位根因后实施最小化修复
+             4. 修复后运行编译验证（后端: mvn compile / 前端: npm run build）
+             5. 确保无回归问题后提交
+
+             ---
+
+             **路由结果**: Bug #{} → {}
+",
+            bid,
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            bug_title, bug_module, _reporter,
+            bug_steps.chars().take(500).collect::<String>(),
+            target_fixer, reason,
+            is_frontend, is_backend, is_db,
+            bid, target_fixer
+        );
+        if let Err(e) = std::fs::write(&archive_path, &archive_content) {
+            tracing::warn!("[zhugeliang] 留档失败: {}", e);
+        } else {
+            tracing::info!("[zhugeliang] 📄 分析报告已存档: {}", archive_path.display());
+        }
+
+        // Step 8: 写入禅道备注 — 完整分析内容
+        if let Some(ref cfg) = cfg {
+            let client = crate::core::zentao::ZentaoClient::from_config(cfg);
+            let comment = format!(
+                "[🤖 诸葛亮预分析] Bug #{}
+
+                 ## 分析结果
+                 - **Bug 标题**: {}
+                 - **模块**: {}
+                 - **路由决策**: {}
+                 - **目标修复 Agent**: {}
+                 - **关键词匹配**: 前端={} / 后端={} / 数据库={}
+
+                 ## Bug 描述摘要
+{}
+
+                 ## 修复建议
+                 1. 先读 AGENTS.md 了解项目规范
+                 2. 分析全链路数据流（前端→Controller→Service→Mapper→DB）
+                 3. 定位根因后实施最小化修复
+                 4. 修复后运行编译验证
+                 5. 确保无回归问题后提交
+
+                 **分析报告已存档**: docs/bug-analyses/bug-{}.md",
+                bid, bug_title, bug_module, reason, target_fixer,
+                is_frontend, is_backend, is_db,
+                bug_steps.chars().take(300).collect::<String>(),
+                bid
+            );
+            let _ = client.comment_bug(&bid, &comment).await;
+        }
+
+        self.traces.log("zhugeliang", "pre_analyze_done", Some(&format!("Bug#{}", bid)),
+            Some(&format!("routed_to={} reason={}", target_fixer, reason)), None, None, None, Some("ok"), None).await;
+    }
+
     /// 诸葛亮：分析修复是否需要 DB 审查，路由到下一步
     async fn handle_pipeline_analyze(&self, msg: &str) {
         let bid = pipeline::extract_bug_id(msg);
@@ -1648,13 +1876,49 @@ async fn degraded_test(bug_id: &str, reporter: &str) -> bool {
 async fn degraded_verify(bug_id: &str, reporter: &str) -> Verdict {
     tracing::warn!("[degraded] Bug #{} 验收降级到自动验收模式", bug_id);
     
-    // 检查 Git commit 是否存在
-    let has_commit = std::process::Command::new("git")
-        .args(["log", "origin/develop", "--grep", &format!("Bug#{}", bug_id), "--oneline", "-1"])
-        .current_dir("/root/.openclaw/workspace/his-repo")
+    // 检查 Git commit 是否存在（先查 develop，再查 agent worktree 分支）
+    let main_repo = "/root/.openclaw/workspace/his-repo";
+    let mut has_commit = std::process::Command::new("git")
+        .args(["-C", main_repo, "log", "origin/develop", "--grep", &format!("Bug#{}", bug_id), "--oneline", "-1"])
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false);
+    // 回退：检查各 agent 分支
+    if !has_commit {
+        for agent in &["guanyu", "zhaoyun", "xunyu", "zhugeliang"] {
+            let found = std::process::Command::new("git")
+                .args(["-C", main_repo, "log", &format!("origin/{}", agent), "--grep", &format!("#{}", bug_id), "--oneline", "-1"])
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if found {
+                has_commit = true;
+                tracing::info!("[degraded] Bug #{} commit found on origin/{}", bug_id, agent);
+                // 尝试 cherry-pick 到 develop
+                let hash = std::process::Command::new("git")
+                    .args(["-C", main_repo, "log", &format!("origin/{}", agent), "--grep", &format!("#{}", bug_id), "--format=%H", "-1"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if !hash.is_empty() {
+                    let _ = std::process::Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
+                    let _ = std::process::Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
+                    let cp = std::process::Command::new("git")
+                        .args(["-C", main_repo, "cherry-pick", "--strategy=recursive", "-X", "theirs", &hash])
+                        .output();
+                    if let Ok(o) = cp {
+                        if o.status.success() {
+                            let _ = std::process::Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
+                            tracing::info!("[degraded] Bug #{} cherry-picked from {} to develop", bug_id, agent);
+                        } else {
+                            let _ = std::process::Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
     
     // 检查编译是否通过
     let compile_ok = std::process::Command::new("mvn")

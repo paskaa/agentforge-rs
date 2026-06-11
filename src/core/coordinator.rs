@@ -177,28 +177,40 @@ pub async fn submit_fix_cli(bug_id: &str, bug_title: &str, fixer: &str) -> anyho
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_multiplexed_async_connection().await?;
     
+    // 铁律：所有 Bug 必须先经过诸葛亮分析，再路由给修复 Agent
+    let zhugeliang_queue = "agent-work-queue:fix:zhugeliang".to_string();
+    
+    // 去重：检查该 bug 是否已在诸葛亮队列中
+    let existing_zg: Vec<String> = conn.lrange(&zhugeliang_queue, 0, -1).await.unwrap_or_default();
+    if existing_zg.iter().any(|s| s.contains(&format!("Bug #{}", bug_id))) {
+        println!("⏭️   Bug #{} 已在诸葛亮分析队列中，跳过重复分派", bug_id);
+        return Ok(());
+    }
+    
+    // 也检查是否已在最终修复 Agent 队列中
+    let fixer_queue = format!("agent-work-queue:fix:{}", fixer);
+    let existing_fixer: Vec<String> = conn.lrange(&fixer_queue, 0, -1).await.unwrap_or_default();
+    if existing_fixer.iter().any(|s| s.contains(&format!("Bug #{}", bug_id))) {
+        println!("⏭️   Bug #{} 已在 {} 队列中，跳过重复分派", bug_id, fixer);
+        return Ok(());
+    }
+    
+    // 发送给诸葛亮分析，携带建议的修复 Agent
     let task = serde_json::json!({
-        "agent_id": fixer,
-        "message": format!("请修复 Bug #{}：{}", bug_id, bug_title),
-        "source": "hermes_action",
-        "sender_id": "hermes",
+        "agent_id": "zhugeliang",
+        "message": format!("请分析 Bug #{} 并设计修复方案，然后路由给合适的修复 Agent 执行。\n建议修复 Agent: {}\nBug 标题: {}", bug_id, fixer, bug_title),
+        "source": "pipeline_pre_analyze",
+        "sender_id": "cli",
+        "suggested_fixer": fixer,
         "chat_id": "",
         "is_dm": "true",
-        "msg_id": format!("hermes-fix-{}", chrono::Local::now().timestamp()),
+        "msg_id": format!("pipeline-pre-analyze-{}-{}", bug_id, chrono::Local::now().timestamp()),
         "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
     });
     
-    let queue = format!("agent-work-queue:fix:{}", fixer);
-    // 去重：检查该 bug 是否已在队列中
-    let existing: Vec<String> = conn.lrange(&queue, 0, -1).await.unwrap_or_default();
-    let already_queued = existing.iter().any(|s| s.contains(&format!("Bug #{}", bug_id)));
-    if already_queued {
-        println!("⏭️   Bug #{} 已在 {} 队列中，跳过重复分派", bug_id, fixer);
-    } else {
-        let _: redis::RedisResult<i64> = conn.rpush(&queue, task.to_string()).await;
-    }
+    let _: redis::RedisResult<i64> = conn.rpush(&zhugeliang_queue, task.to_string()).await;
     
-    println!("已提交 Bug #{} 的修复任务给 {}。修复由 Codex 异步执行。", bug_id, fixer);
+    println!("✅ Bug #{} 已提交给诸葛亮分析（建议修复 Agent: {}）", bug_id, fixer);
     Ok(())
 }
 
@@ -413,24 +425,25 @@ pub async fn pipeline_cli(max_bugs: usize, _default_fixer: &str) -> anyhow::Resu
     let mut results: Vec<PipelineFixResult> = Vec::new();
     for (i, (bug_id, bug_title, fixer)) in all_bugs.iter().take(max_bugs).enumerate() {
         println!("[{}/{}] 🛠️  修复 Bug #{}: {}", i + 1, total, bug_id, bug_title);
-        println!("    队列: agent-work-queue:fix:{}", fixer);
+        println!("    队列: agent-work-queue:fix:zhugeliang (诸葛亮分析)");
         println!("{}", "-".repeat(40));
 
         let start = std::time::Instant::now();
 
-        // 提交到 Redis 队列（与 Executor 消费的同一个队列）
+        // 铁律：所有 Bug 先发给诸葛亮分析，再路由给修复 Agent
         let task = serde_json::json!({
-            "agent_id": fixer,
-            "message": format!("请修复 Bug #{}：{}", bug_id, bug_title),
-            "source": "pipeline",
+            "agent_id": "zhugeliang",
+            "message": format!("请分析 Bug #{} 并设计修复方案，然后路由给合适的修复 Agent 执行。\n建议修复 Agent: {}\nBug 标题: {}", bug_id, fixer, bug_title),
+            "source": "pipeline_pre_analyze",
             "sender_id": "pipeline",
+            "suggested_fixer": fixer,
             "chat_id": "",
             "is_dm": "true",
-            "msg_id": format!("pipeline-fix-{}-{}", bug_id, chrono::Local::now().timestamp()),
+            "msg_id": format!("pipeline-pre-analyze-{}-{}", bug_id, chrono::Local::now().timestamp()),
             "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         });
 
-        let queue = format!("agent-work-queue:fix:{}", fixer);
+        let queue = "agent-work-queue:fix:zhugeliang".to_string();
         // ── 铁律 18: 入列前三重检查 ──
         let (skip, reason) = crate::core::pipeline::should_skip_bug(
             bug_id, fixer, &mut conn, &zentao_client,

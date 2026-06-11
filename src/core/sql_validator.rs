@@ -596,7 +596,7 @@ pub fn validate_mapper_file(file_path: &Path, pg: &PgConfig) -> MapperValidation
 /// 用于修复管线：只检查 Git 中修改过的 mapper XML
 pub fn validate_changed_mappers(work_dir: &str, pg: &PgConfig) -> Vec<MapperValidationResult> {
     let repo_root = Path::new(work_dir);
-    let repo_root = if repo_root.join("openhis-application").exists() {
+    let repo_root = if repo_root.join("healthlink-his-application").exists() {
         repo_root.to_path_buf()
     } else {
         repo_root.parent().map(|p| p.to_path_buf())

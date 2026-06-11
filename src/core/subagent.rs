@@ -791,6 +791,26 @@ fn run_codex_fix_impl(
     let _ = Command::new("git")
         .args(["-C", &worktree, "stash", "--include-untracked"])
         .output();
+    // 铁律: 确保 worktree 在正确的 agent 分支上（防止残留分支导致提交到错误分支）
+    let checkout_result = Command::new("git")
+        .args(["-C", &worktree, "checkout", agent_branch])
+        .output();
+    match checkout_result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("[{}] Worktree 切换到分支 {}", agent_name, agent_branch);
+        }
+        Ok(o) => {
+            // 分支不存在，创建并跟踪远程
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            tracing::warn!("[{}] checkout {} 失败({})，尝试创建分支", agent_name, agent_branch, stderr.chars().take(100).collect::<String>());
+            let _ = Command::new("git")
+                .args(["-C", &worktree, "checkout", "-b", agent_branch, &format!("origin/{}", agent_branch)])
+                .output();
+        }
+        Err(e) => {
+            tracing::warn!("[{}] checkout 执行错误: {}", agent_name, e);
+        }
+    }
     let pull_result = Command::new("git")
         .args(["-C", &worktree, "pull", "--rebase", "origin", agent_branch])
         .output();
@@ -1857,6 +1877,7 @@ pub fn run_harness_loop(
     
     let start = std::time::Instant::now();
     let mut phase_verdicts: Vec<(String, String)> = Vec::new();
+    let mut compile_passed = false; // 跨阶段追踪编译是否通过
     
     // 确定沙箱权限
     let sandbox = if agent_name == "zhaoyun" || agent_name == "guanyu" || agent_name == "xunyu" {
@@ -1887,32 +1908,45 @@ pub fn run_harness_loop(
             Verdict::Fail(r) => r.clone(),
             _ => "unknown".to_string(),
         };
-        // stall/timeout → 自动重试（最多 3 次）
+        // stall/timeout → 主动唤醒重试（最多 3 次，传递上下文）
         if fail_reason.contains("stalled") || fail_reason.contains("timeout") {
-            tracing::warn!("[{}] Bug#{} Phase 1 STALL/TIMEOUT: {}，自动重试", agent_name, bug_id, fail_reason);
+            tracing::warn!("[{}] Bug#{} Phase 1 STALL/TIMEOUT: {}，尝试唤醒重试", agent_name, bug_id, fail_reason);
+            // 收集上次的部分输出作为上下文
+            let partial_output = fix_result.final_message.clone();
+            let partial_tail = if partial_output.len() > 1500 {
+                format!("...{}", &partial_output[partial_output.len()-1500..])
+            } else {
+                partial_output.clone()
+            };
             for retry in 1..=3u32 {
-                tracing::info!("[{}] Bug#{} Phase 1 stall 重试 {}/3", agent_name, bug_id, retry);
+                tracing::info!("[{}] Bug#{} Phase 1 唤醒重试 {}/3（传递 {} 字节上下文）", agent_name, bug_id, retry, partial_tail.len());
+                // 构建带上下文的唤醒 prompt
+                let continue_prompt = if partial_tail.is_empty() {
+                    fix_prompt.clone()
+                } else {
+                    format!("{}
+
+--- 上次执行的部分输出（未完成，请从断点继续）---
+{}
+
+请从上次中断的地方继续完成修复，不需要重新开始。输出最后一行: VERDICT: PASS 或 VERDICT: FAIL",
+                        fix_prompt, partial_tail)
+                };
                 let retry_result = codex_exec::codex_exec(
-                    &fix_prompt, sandbox,
+                    &continue_prompt, sandbox,
                     Some("/root/agentforge-rs/schemas/verdict.json"),
                     Some(agent_name), timeout_secs,
                 );
                 match &retry_result.verdict {
                     Verdict::Fail(r) if r.contains("stalled") || r.contains("timeout") => {
-                        tracing::warn!("[{}] Bug#{} 重试 {} 仍然 stall: {}", agent_name, bug_id, retry, r);
+                        tracing::warn!("[{}] Bug#{} 唤醒重试 {} 仍然 stall: {}", agent_name, bug_id, retry, r);
                         continue;
                     }
                     _ => {
-                        // 重试成功或非 stall 失败，用重试结果继续
-                        tracing::info!("[{}] Bug#{} stall 重试 {} 得到 verdict: {:?}", agent_name, bug_id, retry, retry_result.verdict);
-                        // 替换 fix_result 继续后续流程
-                        // 注意：这里需要重新绑定 fix_result，但 Rust 不支持
-                        // 所以我们直接检查重试结果
+                        tracing::info!("[{}] Bug#{} 唤醒重试 {} verdict: {:?}", agent_name, bug_id, retry, retry_result.verdict);
                         if retry_result.verdict.is_pass() || retry_result.verdict == Verdict::Unknown {
-                            // 重试成功，继续后续阶段
                             break;
                         }
-                        // 非 stall 失败，返回
                         let elapsed = start.elapsed().as_millis() as u64;
                         return CodexResult {
                             success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
@@ -1924,14 +1958,48 @@ pub fn run_harness_loop(
                 }
             }
         }
-        tracing::warn!("[{}] Bug#{} Phase 1 FAIL: {:?}", agent_name, bug_id, fix_result.verdict);
-        let elapsed = start.elapsed().as_millis() as u64;
-        return CodexResult {
-            success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
-            stdout: fix_result.final_message, stderr: fix_result.stderr,
-            exit_code: 1, changes: count_changed_files(agent_name, bug_id),
-            last_phase: "generator".to_string(), phase_verdicts,
-        };
+        // stall 恢复：如果代码已修改，尝试编译验证，不依赖 VERDICT 输出
+        let stall_changes = count_changed_files(agent_name, bug_id);
+        if stall_changes > 0 {
+            tracing::info!("[{}] Bug#{} stall 后检测到 {} 个文件变更，尝试编译验证", agent_name, bug_id, stall_changes);
+            let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+            let compile_result = if agent_name == "zhaoyun" {
+                std::process::Command::new("npx")
+                    .args(["vite", "build", "--mode", "dev"])
+                    .current_dir(&worktree)
+                    .output()
+            } else {
+                std::process::Command::new("mvn")
+                    .args(["compile", "-q", "-pl", "healthlink-his-application", "-am"])
+                    .current_dir(format!("{}/healthlink-his-server", worktree))
+                    .output()
+            };
+            let compile_ok = compile_result.map(|o| o.status.success()).unwrap_or(false);
+            if compile_ok {
+                compile_passed = true;
+                tracing::info!("[{}] Bug#{} stall 恢复：编译通过 ✅，视为 degraded PASS", agent_name, bug_id);
+                phase_verdicts.push(("generator".to_string(), "PASS:stall_recovered".to_string()));
+                // 不返回，继续后续阶段
+            } else {
+                tracing::warn!("[{}] Bug#{} stall 恢复：编译失败 ❌", agent_name, bug_id);
+                let elapsed = start.elapsed().as_millis() as u64;
+                return CodexResult {
+                    success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
+                    stdout: fix_result.final_message, stderr: fix_result.stderr,
+                    exit_code: 1, changes: stall_changes,
+                    last_phase: "generator".to_string(), phase_verdicts,
+                };
+            }
+        } else {
+            tracing::warn!("[{}] Bug#{} Phase 1 FAIL: {:?}", agent_name, bug_id, fix_result.verdict);
+            let elapsed = start.elapsed().as_millis() as u64;
+            return CodexResult {
+                success: false, bug_id: bug_id.to_string(), elapsed_ms: elapsed,
+                stdout: fix_result.final_message, stderr: fix_result.stderr,
+                exit_code: 1, changes: 0,
+                last_phase: "generator".to_string(), phase_verdicts,
+            };
+        }
     }
     if fix_result.verdict == Verdict::Unknown {
         // Unknown — 检查是否有实际代码变更和编译结果
@@ -1973,6 +2041,7 @@ pub fn run_harness_loop(
             match compile_output {
                 Ok(o) if o.status.success() => {
                     compile_ok = true;
+                    compile_passed = true;
                     tracing::info!("[{}] Bug#{} compile attempt {} OK ✅ ({}ms elapsed)",
                         agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
                     break;
@@ -2034,6 +2103,11 @@ pub fn run_harness_loop(
         // compile_ok 必然为 true（无限循环直到编译通过）
         tracing::info!("[{}] Bug#{} compile passed after {} attempts ({}ms) ✅",
             agent_name, bug_id, compile_attempt, start.elapsed().as_millis());
+    }
+    
+    // verdict PASS 意味着 codex 已验证编译通过
+    if fix_result.verdict.is_pass() {
+        compile_passed = true;
     }
     
     // ═══ Phase 2: Reviewer 审查（最多2轮） ═══
@@ -2169,8 +2243,11 @@ pub fn run_harness_loop(
     
     // ═══ 汇总 ═══
     let elapsed = start.elapsed().as_millis() as u64;
-    let all_pass = fix_result.verdict.is_pass() && test_passed && verify_passed;
     let changes = count_changed_files(agent_name, bug_id);
+    // 铁律: verdict UNKNOWN + 有变更 + 编译通过 → 降级判 PASS
+    let fix_effective_pass = fix_result.verdict.is_pass()
+        || (fix_result.verdict == Verdict::Unknown && changes > 0 && compile_passed);
+    let all_pass = fix_effective_pass && test_passed && verify_passed;
     
     tracing::info!("[{}] Bug#{} Harness Loop 完成: fix={} review={} test={} verify={} elapsed={}ms changes={}",
         agent_name, bug_id,
