@@ -1479,7 +1479,15 @@ impl AgentExecutor {
             tracing::info!("[zhugeliang] 📄 分析报告已存档: {}", archive_path.display());
         }
 
-        // Step 8: 写入禅道备注 — 完整分析内容
+        // Step 8: 写入禅道 keywords 字段（API 可持久化）+ 尝试 Web 备注
+        if let Some(ref cfg) = cfg {
+            let client = crate::core::zentao::ZentaoClient::from_config(cfg);
+            // 将分析摘要写入 keywords 字段（禅道 API 可持久化）
+            let analysis_keyword = format!("[诸葛亮分析] {}→{} | {}", bid, target_fixer, reason.chars().take(50).collect::<String>());
+            let _ = client.update_bug_keywords(&bid, &analysis_keyword).await;
+        }
+
+        // Step 9: 写入禅道备注 — 完整分析内容（尝试 Web 表单方式）
         if let Some(ref cfg) = cfg {
             let client = crate::core::zentao::ZentaoClient::from_config(cfg);
             let comment = format!(

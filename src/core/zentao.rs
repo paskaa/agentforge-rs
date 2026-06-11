@@ -234,83 +234,96 @@ impl ZentaoClient {
     /// Zentao REST API 没有独立的 comment 端点，
     /// 添加备注（不改变 Bug 状态）
     /// 使用 update API 仅写入 comment，不触发 resolve/activate 状态变更
+
+    /// 更新 Bug 的 keywords 字段（禅道 API 可持久化）
+    pub async fn update_bug_keywords(&self, bug_id: &str, keywords: &str) -> anyhow::Result<()> {
+        let url = format!("{}/api.php/v1/bugs/{}", self.base_url, bug_id);
+        let body = serde_json::json!({ "keywords": keywords });
+        let resp = self.client.put(&url)
+            .header("Token", &self.token)
+            .json(&body)
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            tracing::info!("[zentao] Bug #{} keywords 已更新", bug_id);
+            Ok(())
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!("[zentao] Bug #{} keywords 更新失败: {}", bug_id, text);
+            anyhow::bail!("keywords update failed: {}", text)
+        }
+    }
     pub async fn comment_bug(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
-        // 方案1: 尝试 POST /bugs/{id}/comment（如果禅道版本支持）
-        let comment_url = format!("{}/api.php/v1/bugs/{}/comment", self.base_url, bug_id);
-        let comment_body = serde_json::json!({
-            "comment": comment
-        });
-        let resp = self.client.post(&comment_url)
-            .header("Token", &self.token)
-            .json(&comment_body)
-            .send()
-            .await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                tracing::info!("[zentao] Bug #{} 备注已添加 (comment API)", bug_id);
-                return Ok(());
-            }
-            _ => {
-                // 方案2: 降级使用 update API（只传 comment 字段，不改状态）
-                tracing::debug!("[zentao] Bug #{} comment API 不可用，降级使用 update API", bug_id);
-            }
-        }
-        let update_url = format!("{}/api.php/v1/bugs/{}", self.base_url, bug_id);
-        let update_body = serde_json::json!({
-            "comment": comment
-        });
-        let resp2 = self.client.put(&update_url)
-            .header("Token", &self.token)
-            .json(&update_body)
-            .send()
-            .await;
-        match resp2 {
-            Ok(r) if r.status().is_success() => {
-                tracing::info!("[zentao] Bug #{} 备注已添加 (update API)", bug_id);
-                Ok(())
-            }
-            Ok(r) => {
-                let text = r.text().await.unwrap_or_default();
-                tracing::warn!("[zentao] Bug #{} update for comment failed: {}", bug_id, text);
-                // 方案3: 最终降级用 CLI
-                self.comment_bug_cli(bug_id, comment)
-            }
-            Err(e) => {
-                tracing::warn!("[zentao] Bug #{} update for comment error: {}", bug_id, e);
-                self.comment_bug_cli(bug_id, comment)
-            }
-        }
+        // 禅道 REST API v1 不支持备注接口，直接使用 Web 表单方式
+        // （POST comment API 和 PUT update API 的 comment 字段均不产生可见备注）
+        tracing::debug!("[zentao] Bug #{} 使用 Web 表单添加备注", bug_id);
+        self.comment_bug_cli(bug_id, comment)
     }
 
     /// CLI 降级方案：通过 zentao CLI 添加备注（不改状态）
     fn comment_bug_cli(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
         let app_cfg = crate::config::Config::load().unwrap_or_default();
-        let cli = &app_cfg.zentao.cli_path;
-        let _ = std::process::Command::new("bash")
-            .args(["-c", &format!("{} login -s {} -u {} -p {}", cli, app_cfg.zentao.base_url, app_cfg.zentao.username, app_cfg.zentao.password)])
+        let base_url = &app_cfg.zentao.base_url;
+        let username = &app_cfg.zentao.username;
+        let password = &app_cfg.zentao.password;
+        let cookie_jar = "/tmp/zentao_comment_cookies.txt";
+
+        // Step 1: 登录获取 session cookie
+        let login_output = std::process::Command::new("curl")
+            .args(["-s", "-c", cookie_jar, "-b", cookie_jar, "-L",
+                &format!("{}/index.php?m=user&f=login", base_url),
+                "-d", &format!("account={}&password={}&referer=%2F", username, password)])
             .output();
-        let result = std::process::Command::new(cli)
-            .args(["bug", "update", "--id", bug_id, "--comment", comment])
-            .output();
-        match result {
-            Ok(o) if o.status.success() => {
-                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                if stdout.contains("success") || stdout.contains("保存成功") {
-                    tracing::info!("[zentao] Bug #{} 备注已添加 (CLI)", bug_id);
-                    Ok(())
-                } else {
-                    tracing::warn!("[zentao] Bug #{} CLI 备注异常: {}", bug_id, stdout);
-                    anyhow::bail!("CLI comment failed: {}", stdout)
-                }
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                tracing::warn!("[zentao] Bug #{} CLI 备注失败: {}", bug_id, stderr);
-                anyhow::bail!("CLI comment failed: {}", stderr)
+
+        match login_output {
+            Ok(o) if !o.status.success() => {
+                tracing::warn!("[zentao] Bug #{} 登录失败", bug_id);
+                anyhow::bail!("zentao login failed");
             }
             Err(e) => {
-                tracing::warn!("[zentao] Bug #{} CLI 备注错误: {}", bug_id, e);
-                anyhow::bail!("CLI comment error: {}", e)
+                tracing::warn!("[zentao] Bug #{} 登录错误: {}", bug_id, e);
+                anyhow::bail!("zentao login error: {}", e);
+            }
+            _ => {}
+        }
+
+        // Step 2: 通过 Web 表单提交备注
+        // 简单 URL 编码
+        let encoded_comment: String = comment.bytes().flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => vec![b as char],
+            b' ' => vec!['+'],
+            _ => format!("%{:02X}", b).chars().collect::<Vec<_>>(),
+        }).collect();
+        let comment_url = format!(
+            "{}/index.php?m=bug&f=comment&bugID={}&onlybody=yes",
+            base_url, bug_id
+        );
+        let post_data = format!("comment={}", encoded_comment);
+
+        let comment_output = std::process::Command::new("curl")
+            .args(["-s", "-b", cookie_jar, "-X", "POST", &comment_url,
+                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "-H", "X-Requested-With: XMLHttpRequest",
+                "-d", &post_data])
+            .output();
+
+        // 清理 cookie 文件
+        let _ = std::fs::remove_file(cookie_jar);
+
+        match comment_output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                if stdout.contains(r#""result":true"#) || stdout.contains(r#""result": true"#) {
+                    tracing::info!("[zentao] Bug #{} 备注已添加 (Web)", bug_id);
+                    Ok(())
+                } else {
+                    tracing::warn!("[zentao] Bug #{} Web 备注响应: {}", bug_id, stdout.chars().take(100).collect::<String>());
+                    anyhow::bail!("web comment failed: {}", stdout.chars().take(100).collect::<String>())
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} Web 备注错误: {}", bug_id, e);
+                anyhow::bail!("web comment error: {}", e)
             }
         }
     }
