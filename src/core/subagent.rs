@@ -1398,8 +1398,51 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                                             .args(["-C", main_repo, "cherry-pick", "--abort"])
                                             .output();
                                         let err2 = String::from_utf8_lossy(&o2.stderr).to_string();
-                                        tracing::warn!("[{}] Cherry-pick to develop failed for Bug #{}: {}",
+                                        tracing::warn!("[{}] Cherry-pick retry failed for Bug #{}: {}, 尝试 checkout 文件方式合入",
                                             agent_name, bug_id, err2.chars().take(200).collect::<String>());
+                                        // 第三回退：直接从 fix commit checkout 变更文件，手动 commit
+                                        let changed = Command::new("git")
+                                            .args(["-C", &worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", &hash])
+                                            .output();
+                                        if let Ok(changed_out) = changed {
+                                            let files = String::from_utf8_lossy(&changed_out.stdout);
+                                            let file_list: Vec<&str> = files.lines().filter(|f| !f.is_empty()).collect();
+                                            if !file_list.is_empty() {
+                                                // reset develop 到最新
+                                                let _ = Command::new("git")
+                                                    .args(["-C", main_repo, "checkout", "develop"])
+                                                    .output();
+                                                let _ = Command::new("git")
+                                                    .args(["-C", main_repo, "reset", "--hard", "origin/develop"])
+                                                    .output();
+                                                // 从 fix commit checkout 每个变更文件
+                                                for f in &file_list {
+                                                    let _ = Command::new("git")
+                                                        .args(["-C", main_repo, "checkout", &hash, "--", f])
+                                                        .output();
+                                                }
+                                                // add + commit
+                                                let mut add_args = vec!["-C", main_repo, "add"];
+                                                for f in &file_list { add_args.push(f); }
+                                                let _ = Command::new("git").args(&add_args).output();
+                                                let commit_msg = format!("fix(#{}): {} (文件合入)", bug_id, agent_name);
+                                                let commit_out = Command::new("git")
+                                                    .args(["-C", main_repo, "commit", "-m", &commit_msg, "--author", &author])
+                                                    .output();
+                                                match commit_out {
+                                                    Ok(co) if co.status.success() => {
+                                                        let _ = Command::new("git")
+                                                            .args(["-C", main_repo, "push", "origin", "develop"])
+                                                            .output();
+                                                        tracing::info!("[{}] Bug#{} 文件合入到 develop 成功 ({} 个文件)",
+                                                            agent_name, bug_id, file_list.len());
+                                                    }
+                                                    _ => {
+                                                        tracing::warn!("[{}] Bug#{} 文件合入 commit 失败", agent_name, bug_id);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         let _ = Command::new("git")
