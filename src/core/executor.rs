@@ -58,6 +58,7 @@ pub struct AgentExecutor {
     fix_stream: String, is_fixer: bool,
     last_coordinator_scan: Instant,
     last_retry_check: Instant,
+    last_analysis_scan: Instant,
     last_stream_id: String,
     zentao_dir: String,
 }
@@ -80,7 +81,7 @@ impl AgentExecutor {
         let feishu = FeishuClient::new(&config.feishu.app_id, &config.feishu.app_secret, &config.feishu.group_chat_id);
         let traces = Arc::new(TraceStore::open(std::path::Path::new("/var/lib/agentforge/traces.db")).await?);
         Ok(Self { agent_id: agent_id.into(), agent_name, redis, redis_sync, llm, feishu, traces, fix_stream, is_fixer,
-            last_coordinator_scan: Instant::now(), last_retry_check: Instant::now(), last_stream_id: "$".into(),
+            last_coordinator_scan: Instant::now(), last_retry_check: Instant::now(), last_analysis_scan: Instant::now(), last_stream_id: "$".into(),
             zentao_dir: "/root/.openclaw/extensions/zentao-token-refresh".into() })
     }
 
@@ -141,6 +142,12 @@ impl AgentExecutor {
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     continue;
                 }
+            }
+
+            // 修复人员定期扫描诸葛亮分析文档（每 60 秒）
+            if self.is_fixer && self.last_analysis_scan.elapsed() > Duration::from_secs(60) {
+                self.last_analysis_scan = Instant::now();
+                self.scan_analysis_docs().await;
             }
 
             let val = if self.is_fixer {
@@ -250,6 +257,66 @@ impl AgentExecutor {
         if requeued > 0 {
             tracing::info!("[{}] Startup recovery: requeued {} failed bugs", self.agent_id, requeued);
             let _ = self.feishu.send(&format!("🔄 [{}] 启动恢复：重新入队 {} 个失败 Bug", self.agent_name, requeued), None).await;
+        }
+    }
+
+    /// 扫描诸葛亮分析文档，找到分配给自己的 Bug 并入队
+    async fn scan_analysis_docs(&self) {
+        let bugs_dir = std::path::Path::new("/tmp/agentforge-worktrees/zhugeliang/MD/bugs");
+        if !bugs_dir.exists() { return; }
+
+        let my_queue = format!("agent-work-queue:fix:{}", self.agent_id);
+        let fixer_id_pattern = format!("**FIXER_ID**: {}", self.agent_id);
+        let fixer_id_pattern2 = format!("**FIXER_ID**: {}", match self.agent_id.as_str() {
+            "guanyu" => "guanyu", "zhaoyun" => "zhaoyun", "xunyu" => "xunyu", _ => "",
+        });
+
+        let Ok(entries) = std::fs::read_dir(bugs_dir) else { return };
+        let mut found = 0u32;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+            // 只看 BUG_*_ANALYSIS.md
+            if !fname.starts_with("BUG_") || !fname.ends_with("_ANALYSIS.md") { continue; }
+
+            // 提取 Bug ID
+            let bid = fname.strip_prefix("BUG_").unwrap_or("")
+                .strip_suffix("_ANALYSIS.md").unwrap_or("")
+                .to_string();
+            if bid.is_empty() { continue; }
+
+            // 检查分析文档是否分配给自己
+            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            if !content.contains(&fixer_id_pattern) && !content.contains(&fixer_id_pattern2) { continue; }
+
+            // 检查是否已在队列中（去重）
+            let existing: Vec<String> = self.redis.clone().lrange(&my_queue, 0, -1).await.unwrap_or_default();
+            if existing.iter().any(|s| s.contains(&format!("Bug #{}", bid))) { continue; }
+
+            // 检查是否已修复（git log 检查）
+            // 检查是否已在处理中
+            let lock_key = format!("fix_active:{}:{}", self.agent_id, bid);
+            if self.redis.clone().exists::<_, bool>(&lock_key).await.unwrap_or(false) { continue; }
+
+            // 入队
+            let task = serde_json::json!({
+                "agent_id": self.agent_id,
+                "message": format!("请修复 Bug #{}（诸葛亮分析完成，分配给你）", bid),
+                "source": "analysis_scan",
+                "sender_id": "zhugeliang",
+                "chat_id": "", "is_dm": "true",
+                "msg_id": format!("scan-{}-{}-{}", bid, self.agent_id, chrono::Local::now().timestamp()),
+                "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            });
+            let _: redis::RedisResult<i64> = self.redis.clone().rpush(&my_queue, task.to_string()).await;
+            found += 1;
+            tracing::info!("[{}] 📄 发现分析文档 Bug #{}，自动入队", self.agent_id, bid);
+        }
+
+        if found > 0 {
+            tracing::info!("[{}] 扫描分析文档: 新入队 {} 个 Bug", self.agent_id, found);
+            let _ = self.feishu.send(&format!("📄 [{}] 发现 {} 个新分析文档，已入队", self.agent_name, found), None).await;
         }
     }
 
@@ -1460,24 +1527,16 @@ impl AgentExecutor {
         let event = PipelineEvent::Handoff { bug_id: bid.clone(), from: "zhugeliang".into(), to: target_fixer.into(), stage: "pre_analyze".into() };
         self.publish_trace("pipeline", "handoff", &format!("Bug#{}", bid), &event.to_json(), "ok", 0).await;
 
-        // Step 6: 路由给修复 Agent
-        let fix_task = serde_json::json!({
-            "agent_id": target_fixer,
-            "message": format!("请修复 Bug #{}。\n\n{}", bid, analysis_report),
-            "source": "pipeline", "sender_id": "zhugeliang", "bug_reporter": _reporter,
-            "msg_id": format!("pipeline-fix-{}-{}", bid, chrono::Local::now().timestamp()),
-            "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
-            "chat_id": "", "is_dm": "true",
-        });
-        let queue = format!("agent-work-queue:fix:{}", target_fixer);
-        let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, fix_task.to_string()).await;
-        let _ = self.feishu.send(&format!("🔍 诸葛亮分析 Bug #{} → {} ({})", bid, target_fixer, reason), None).await;
+        // Step 6: 记录路由信息（不再直接推送到修复队列，由修复人员主动扫描分析文档）
+        tracing::info!("[zhugeliang] Bug #{} 分析完成，路由: {} ({})", bid, target_fixer, reason);
+        let _ = self.feishu.send(&format!("🔍 诸葛亮分析完成 Bug #{} → {} ({})\n📄 分析文档: MD/bugs/BUG_{}_ANALYSIS.md", bid, target_fixer, reason, bid), None).await;
 
         // Step 7: 留档到 MD/bugs/ 并 git commit（铁律：不论能否修复，必须先提交分析）
         let worktree_dir = std::path::PathBuf::from("/tmp/agentforge-worktrees/zhugeliang");
         let bugs_dir = worktree_dir.join("MD/bugs");
         let _ = std::fs::create_dir_all(&bugs_dir);
         let archive_path = bugs_dir.join(format!("BUG_{}_ANALYSIS.md", bid));
+        let fixer_name_str = match target_fixer { "guanyu" => "后端", "zhaoyun" => "前端", "xunyu" => "数据库", _ => "通用" };
         let archive_content = format!(
             "# Bug #{} 诸葛亮分析报告\n\n\
              > **文档类型**: Bug分析\n\
@@ -1493,11 +1552,13 @@ impl AgentExecutor {
              {}\n\n\
              ---\n\n\
              ## 路由决策\n\
-             - **修复 Agent**: {}\n\
-             - **原因**: {}\n",
+             - **FIXER_ID**: {}\n\
+             - **修复 Agent**: {}（{}）\n\
+             - **原因**: {}\n\n\
+             > ⚠️ 修复人员请先验证以上分析是否正确，再执行修复。\n",
             bid, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             bid, bug_title, bug_module, _reporter,
-            analysis_content, target_fixer, reason
+            analysis_content, target_fixer, target_fixer, fixer_name_str, reason
         );
         // 铁律：不覆盖已有的完整分析（含根因分析的），只在降级分析时跳过
         let should_write = if archive_path.exists() {
@@ -1516,9 +1577,14 @@ impl AgentExecutor {
         }
 
         // 铁律：分析文档必须 git commit + push（不论能否修复）
+        // ⚠️ 只提交分析文件，绝不碰其他文件（避免误删）
         let commit_msg = format!("docs(bug): 诸葛亮分析报告 Bug #{}", bid);
         let bug_file = format!("MD/bugs/BUG_{}_ANALYSIS.md", bid);
-        // 先解决可能的冲突：stash 非分析文件的改动
+        // 先 reset 掉所有未提交的改动（保持 worktree 干净）
+        let _ = std::process::Command::new("git")
+            .current_dir(&worktree_dir)
+            .args(["reset", "HEAD", "--", "."])
+            .output();
         let _ = std::process::Command::new("git")
             .current_dir(&worktree_dir)
             .args(["checkout", "--", "."])
@@ -1532,7 +1598,7 @@ impl AgentExecutor {
             .current_dir(&worktree_dir)
             .args(["rebase", "origin/develop"])
             .output();
-        // 强制 add 分析文件
+        // 只 add 分析文件（-f 强制添加，不影响其他文件）
         let add_out = std::process::Command::new("git")
             .current_dir(&worktree_dir)
             .args(["add", "-f", &bug_file])
