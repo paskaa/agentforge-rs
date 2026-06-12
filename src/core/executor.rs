@@ -1472,8 +1472,21 @@ impl AgentExecutor {
             bid, bug_title, bug_module, _reporter,
             analysis_content, target_fixer, reason
         );
-        let _ = std::fs::write(&archive_path, &archive_content);
-        tracing::info!("[zhugeliang] 📄 存档: {}", archive_path.display());
+        // 铁律：不覆盖已有的完整分析（含根因分析的），只在降级分析时跳过
+        let should_write = if archive_path.exists() {
+            if let Ok(existing) = std::fs::read_to_string(&archive_path) {
+                let is_complete = existing.contains("根因分析") || existing.contains("根因定位") || existing.contains("修复方案");
+                let is_degraded = analysis_content.contains("LLM 失败") || analysis_content.contains("关键词分析");
+                if is_complete && is_degraded {
+                    tracing::info!("[zhugeliang] ⏭ 跳过覆盖: 已有完整分析，当前为降级分析");
+                    false
+                } else { true }
+            } else { true }
+        } else { true };
+        if should_write {
+            let _ = std::fs::write(&archive_path, &archive_content);
+            tracing::info!("[zhugeliang] 📄 存档: {}", archive_path.display());
+        }
 
         // 铁律：分析文档必须 git commit（不论能否修复）
         let commit_msg = format!("docs(bug): 诸葛亮分析报告 Bug #{}", bid);
