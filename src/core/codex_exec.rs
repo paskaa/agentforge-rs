@@ -353,24 +353,33 @@ pub fn codex_exec(
                         stderr: partial_stderr,
                     };
                 }
-                // 检查停滞：有输出活动则不杀
+                // 检查停滞：无输出但子进程仍在运行（LLM 推理中），不杀进程
+                // 只依赖总体超时 (timeout_duration) 来终止，停滞检测仅用于日志
                 let idle = if let Ok(guard) = last_activity.lock() {
                     guard.elapsed()
                 } else {
-                    stall_timeout // 保守处理
+                    std::time::Duration::from_secs(0)
                 };
                 if idle > stall_timeout {
-                    tracing::warn!("[codex_exec] STALLED — no output for {}s, killing codex (elapsed={}s)",
-                        idle.as_secs(), start.elapsed().as_secs());
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return CodexExecResult {
-                        success: false, final_message: String::new(),
-                        verdict: Verdict::Fail(format!("stalled — no output for {}s", idle.as_secs())),
-                        events: vec![], total_tokens: 0,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        stderr: format!("codex stalled — no output for {}s", idle.as_secs()),
-                    };
+                    // 检查子进程是否还活着且有 CPU 活动
+                    let pid = child.id();
+                    let proc_alive = if pid > 0 {
+                        std::path::Path::new(&format!("/proc/{}/stat", pid)).exists()
+                    } else { false };
+                    if proc_alive {
+                        // 子进程还在运行（LLM 推理中），仅记录日志，不杀
+                        tracing::info!("[codex_exec] No stdout for {}s but process alive (pid={}), waiting... (elapsed={}s)",
+                            idle.as_secs(), pid, start.elapsed().as_secs());
+                    } else {
+                        tracing::warn!("[codex_exec] STALLED — process dead, no output for {}s", idle.as_secs());
+                        return CodexExecResult {
+                            success: false, final_message: String::new(),
+                            verdict: Verdict::Fail(format!("stalled — process dead, no output for {}s", idle.as_secs())),
+                            events: vec![], total_tokens: 0,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            stderr: format!("codex stalled — process dead for {}s", idle.as_secs()),
+                        };
+                    }
                 }
                 // ── 推理重复检测：mimo-v2.5 可能陷入推理死循环 ──
                 // 检查 stdout（reasoning JSONL）和 stderr 中是否有重复模式
