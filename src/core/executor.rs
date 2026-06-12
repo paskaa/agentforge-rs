@@ -352,10 +352,13 @@ impl AgentExecutor {
         if bug_id.is_empty() { return; }
         // ── 铁律: 检查禅道 Bug 状态 — 已关闭/已解决的 Bug 禁止处理 ──
         {
+            tracing::info!("[{}] Bug#{} 开始状态检查...", self.agent_id, bug_id);
             let cfg = crate::config::Config::load().ok();
             if let Some(cfg) = cfg {
                 let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                tracing::info!("[{}] Bug#{} 调用 get_bug...", self.agent_id, bug_id);
                 if let Ok(bug_detail) = client.get_bug(&bug_id).await {
+                    tracing::info!("[{}] Bug#{} get_bug 完成, status={}", self.agent_id, bug_id, bug_detail.status);
                     if bug_detail.status == "resolved" || bug_detail.status == "closed" || bug_detail.status == "done" {
                         tracing::warn!("[{}] Bug#{} 禅道状态={}, 已关闭/已解决，跳过处理", self.agent_id, bug_id, bug_detail.status);
                         let _ = self.feishu.send(&format!("⏭️ Bug#{} 状态={}，已关闭，跳过处理", bug_id, bug_detail.status), None).await;
@@ -1331,12 +1334,17 @@ impl AgentExecutor {
         }
 
         // Step 2: 调用 LLM 深度分析
+        // 铁律：诸葛亮必须读模块索引快速定位
+        let module_index = std::fs::read_to_string("/root/.openclaw/workspace/his-repo/MD/MODULE_INDEX.md")
+            .unwrap_or_default();
         let analysis_prompt = format!(
             "你是诸葛亮，HealthLink-HIS 系统的架构师。\n\n\
              ## 你的任务\n\
-             分析以下 Bug 并给出根因和修复方案。\n\
+             分析以下 Bug 并给出根因和修复方案。\n\n\
+             ## 代码模块索引（根据 Bug 关键词定位目标模块）\n\
+             {}\n\n\
              **重要规则：**\n\
-             1. **先读 `MD/MODULE_INDEX.md`**，根据 Bug 关键词找到目标模块\n\
+             1. **先根据上面的模块索引**，根据 Bug 关键词找到目标模块\n\
              2. **最多读 5 个关键文件**（Controller + ServiceImpl + Mapper）\n\
              3. **不要大面积搜索代码**，基于描述和索引直接定位\n\
              4. 分析足够就直接输出结论\n\
@@ -1356,7 +1364,7 @@ impl AgentExecutor {
              ### 四、路由决策\n\
              FIXER: guanyu 或 zhaoyun 或 xunyu\n\
              REASON: 一句话说明为什么交给这个角色",
-            bid, bug_title, bug_module, bug_steps.chars().take(2000).collect::<String>()
+            module_index, bid, bug_title, bug_module, bug_steps.chars().take(2000).collect::<String>()
         );
 
         let bid_clone = bid.clone();

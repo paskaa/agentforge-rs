@@ -174,6 +174,34 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     // 加载统一铁律文件
     let iron_laws = load_skill("/root/.codex/rules/IRON_LAWS.md");
 
+    // 加载模块索引（铁律：修复人员必须读模块索引快速定位）
+    let module_index = load_skill("/root/.openclaw/workspace/his-repo/MD/MODULE_INDEX.md");
+
+    // 加载诸葛亮分析文档（铁律：修复人员必须先读分析文档并验证正确性）
+    let analysis_doc = {
+        let path = format!("/tmp/agentforge-worktrees/zhugeliang/MD/bugs/BUG_{}_ANALYSIS.md", bug_id);
+        let doc = load_skill(&path);
+        if doc.is_empty() {
+            // 也尝试从修复者自己的 worktree 读
+            let alt_path = format!("/tmp/agentforge-worktrees/{}/MD/bugs/BUG_{}_ANALYSIS.md", agent_name, bug_id);
+            load_skill(&alt_path)
+        } else { doc }
+    };
+    let analysis_section = if analysis_doc.is_empty() {
+        "（未找到诸葛亮分析文档，请自行分析根因后修复）".to_string()
+    } else {
+        format!(r#"## ⚠️ 诸葛亮分析报告（必须先读，验证后再修复）
+
+**铁律：你必须先阅读以下分析报告，判断分析是否正确。**
+- 如果分析正确 → 按方案执行修复
+- 如果分析有误 → 修正分析后修复，并在输出中说明修正点
+- 如果分析不完整 → 补充分析后修复
+
+```markdown
+{}
+```"#, analysis_doc)
+    };
+
     // Find agent role info
     let role_info = AGENT_ROLES.iter().find(|r| r.0 == agent_name);
     let (role_name, role_desc, expertise): (&str, &str, &str) = match role_info {
@@ -202,6 +230,11 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 你的专长领域：{expertise}
 
 {constraints}{extra_constraints}
+
+{analysis_section}
+
+## 代码模块索引（根据 Bug 关键词定位目标模块）
+{module_index}
 
 ## 工作纪律
 1. **Init**: 确认工作目录，读 AGENTS.md 了解项目规范
@@ -281,6 +314,8 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
         constraints=constraints,
         bug_id=bug_id, bug_title=bug_title, bug_details=bug_details,
         agents_md_hint=agents_md_hint,
+        module_index=module_index,
+        analysis_section=analysis_section,
     )
 }
 

@@ -256,7 +256,7 @@ pub fn parse_bugs_from_message(msg: &str) -> Vec<(String, String)> {
     for line in msg.lines() {
         if let Some(pos) = line.find('#') {
             let after = &line[pos+1..];
-            let end = after.find(|c: char| c == '：' || c == ':' || c.is_whitespace())
+            let end = after.find(|c: char| c == '：' || c == ':' || c == '。' || c == '，' || c == '（' || c == '(' || c.is_whitespace())
                 .unwrap_or(after.len());
             let bid = after[..end].trim().to_string();
             if bid.chars().all(|c| c.is_ascii_digit()) && bid.len() >= 2 {
@@ -271,7 +271,7 @@ pub fn parse_bugs_from_message(msg: &str) -> Vec<(String, String)> {
 /// Extract bug ID from a message like "Bug #462（测试标题）回归测试完成...".
 pub fn extract_bug_id(msg: &str) -> String {
     msg.split('#').nth(1)
-        .and_then(|s| s.split(|c: char| c == '：' || c == ':' || c == '（' || c == '(' || c.is_whitespace()).next())
+        .and_then(|s| s.split(|c: char| c == '：' || c == ':' || c == '。' || c == '，' || c == '（' || c == '(' || c.is_whitespace()).next())
         .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
         .map(|s| s.to_string())
         .unwrap_or_default()

@@ -15,7 +15,7 @@
 //!   3. 提取最终消息和 VERDICT
 
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 /// Codex JSONL 事件类型
@@ -233,10 +233,19 @@ pub fn codex_exec(
     };
     cmd.current_dir(&work_dir);
 
+    // 必须显式设置 piped，否则默认 Inherit 导致 stdout/stderr 直接写到 journal 而不是被 Rust 读取
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    tracing::info!("[codex_exec] spawning: {:?} in {:?}", cmd.get_args().collect::<Vec<_>>(), work_dir);
+
     // 执行（带超时保护：spawn + try_wait 循环）
     let mut child = match cmd.spawn() {
-        Ok(c) => c,
+        Ok(c) => {
+            tracing::info!("[codex_exec] spawned pid={}", c.id());
+            c
+        },
         Err(e) => {
+            tracing::error!("[codex_exec] spawn failed: {}", e);
             return CodexExecResult {
                 success: false, final_message: String::new(),
                 verdict: Verdict::Fail(format!("spawn error: {}", e)),
@@ -393,6 +402,7 @@ pub fn codex_exec(
                         let len = s.len();
                         if len > 3000 {
                             let tail_start = if len > 2000 { len - 2000 } else { 0 };
+                            let tail_start = s.floor_char_boundary(tail_start);
                             let tail = &s[tail_start..];
                             let spent = tail.matches("I've spent").count();
                             let apply = tail.matches("apply a fix now").count();
@@ -410,6 +420,7 @@ pub fn codex_exec(
                             let len = s.len();
                             if len > 2000 {
                                 let tail_start = if len > 1500 { len - 1500 } else { 0 };
+                                let tail_start = s.floor_char_boundary(tail_start);
                                 let tail = &s[tail_start..];
                                 let spent = tail.matches("I've spent").count();
                                 let apply = tail.matches("apply a fix now").count();
@@ -456,10 +467,11 @@ pub fn codex_exec(
     stderr = stderr_buf.lock().map(|g| String::from_utf8_lossy(&g).to_string()).unwrap_or_default();
 
 
-    // 解析 JSONL 事件流
+    // 解析 JSONL 事件流（stdout）
     let mut events = Vec::new();
     let mut final_message = String::new();
     let mut total_tokens: u64 = 0;
+    let mut agent_msg_count: u32 = 0;
 
     for line in stdout.lines() {
         if line.trim().is_empty() { continue; }
@@ -468,7 +480,9 @@ pub fn codex_exec(
                 CodexEvent::ItemCompleted { item } => {
                     if item.item_type == "agent_message" {
                         if let Some(text) = &item.text {
+                            agent_msg_count += 1;
                             final_message = text.clone();
+                            tracing::debug!("[codex_exec] stdout agent_message #{}: {} chars", agent_msg_count, text.len());
                         }
                     }
                 }
@@ -484,8 +498,31 @@ pub fn codex_exec(
         }
     }
 
-    // 如果没有 JSONL 事件，把 stdout 当作最终消息
+    tracing::info!("[codex_exec] stdout parsed: {} agent_messages, final_message={} chars, stdout_total={} chars",
+        agent_msg_count, final_message.len(), stdout.len());
+
+    // 降级：如果 stdout 没拿到 final_message，从 stderr 的 JSON 行中提取
+    if final_message.is_empty() && !stderr.is_empty() {
+        tracing::warn!("[codex_exec] stdout 无 agent_message，尝试从 stderr 提取 ({} chars)", stderr.len());
+        for line in stderr.lines() {
+            if line.trim().is_empty() { continue; }
+            // stderr 中的 JSON 行格式: {"type":"item.completed","item":{...}}
+            if let Ok(event) = serde_json::from_str::<CodexEvent>(line) {
+                if let CodexEvent::ItemCompleted { item } = &event {
+                    if item.item_type == "agent_message" {
+                        if let Some(text) = &item.text {
+                            final_message = text.clone();
+                            tracing::info!("[codex_exec] stderr fallback: captured agent_message ({} chars)", text.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 最终降级：把 stdout 当作最终消息
     if final_message.is_empty() && !stdout.trim().is_empty() {
+        tracing::warn!("[codex_exec] 所有解析失败，使用 stdout 原始内容 ({} chars)", stdout.len());
         final_message = stdout.trim().to_string();
     }
 

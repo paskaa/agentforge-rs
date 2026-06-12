@@ -112,7 +112,11 @@ impl ZentaoClient {
         Self {
             base_url: cfg.zentao.base_url.trim_end_matches('/').to_string(),
             token,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
