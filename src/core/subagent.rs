@@ -1138,7 +1138,7 @@ fn query_bug_details(bug_id: &str) -> String {
 /// - 操作历史（谁在什么时候做了什么）
 /// - 纯文本步骤提取（去除 HTML 标签保留文字）
 /// Extract fileIDs from raw_steps_html (HTML tags contain fileID=xxx)
-fn extract_file_ids_from_html(html: &str) -> Vec<String> {
+pub fn extract_file_ids_from_html(html: &str) -> Vec<String> {
     let mut file_ids: Vec<String> = Vec::new();
     let mut pos = 0;
     while let Some(idx) = html[pos..].find("fileID=") {
@@ -1159,7 +1159,7 @@ fn extract_file_ids_from_html(html: &str) -> Vec<String> {
 }
 
 /// Download a Zentao file attachment by fileID, returns raw bytes
-async fn download_zentao_image(cfg: &crate::config::Config, fid: &str) -> anyhow::Result<Vec<u8>> {
+pub async fn download_zentao_image(cfg: &crate::config::Config, fid: &str) -> anyhow::Result<Vec<u8>> {
     let token = std::fs::read_to_string("/root/.config/zentao/.env")
         .ok()
         .and_then(|c| {

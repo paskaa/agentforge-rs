@@ -1392,13 +1392,45 @@ impl AgentExecutor {
 
         tracing::info!("[zhugeliang] 🔍 深度分析 Bug #{} (建议: {})", bid, suggested_fixer);
 
-        // Step 1: 获取 Bug 详情
+        // Step 1: 获取 Bug 详情（完整复刻禅道内容）
         let cfg = crate::config::Config::load().ok();
-        let (bug_title, bug_steps, bug_module, _reporter) = if let Some(ref cfg) = cfg {
+        let (bug_title, bug_full_text, bug_module, _reporter) = if let Some(ref cfg) = cfg {
             let client = crate::core::zentao::ZentaoClient::from_config(cfg);
             match client.get_bug(&bid).await {
                 Ok(detail) => {
-                    (detail.title.clone(), detail.steps.clone(), detail.module_title.clone(), detail.opened_by.clone())
+                    let title = detail.title.clone();
+                    let module = detail.module_title.clone();
+                    let reporter = detail.opened_by.clone();
+                    // 使用 format_for_prompt 获取完整信息（含严重程度、优先级、步骤等）
+                    let mut full_text = detail.format_for_prompt();
+
+                    // Vision 多模态分析：提取附图并识别内容
+                    let file_ids = crate::core::subagent::extract_file_ids_from_html(&detail.raw_steps_html);
+                    if !file_ids.is_empty() {
+                        tracing::info!("[zhugeliang] Bug #{} 发现 {} 张附图，尝试 Vision 分析", bid, file_ids.len());
+                        let mut images: Vec<Vec<u8>> = Vec::new();
+                        for fid in &file_ids {
+                            if let Ok(bytes) = crate::core::subagent::download_zentao_image(cfg, fid).await {
+                                if bytes.len() > 100 { images.push(bytes); }
+                            }
+                        }
+                        if !images.is_empty() {
+                            let llm = crate::core::llm::LlmClient::from_config(cfg);
+                            let system = "你是 HIS 系统的 Bug 分析专家。仔细观察截图中的每一个细节：错误信息、界面元素、数据内容、异常状态。完整描述你看到的内容。";
+                            let user = format!("请仔细观察以下截图，完整描述截图中显示的所有内容，包括：\n1. 页面标题和导航\n2. 错误提示信息（完整复制）\n3. 表单/列表中的数据\n4. 异常状态或界面问题\n\nBug 信息：\n{}", full_text);
+                            match llm.vision(system, &user, &images, Some(&llm.vision_model), None, Some(4096)).await {
+                                Ok(vision_ans) => {
+                                    full_text.push_str("\n\n### 附图分析（Vision 多模态识别）\n");
+                                    full_text.push_str(&vision_ans);
+                                    tracing::info!("[zhugeliang] Bug #{} Vision 分析完成（{} 张图）", bid, images.len());
+                                }
+                                Err(e) => {
+                                    tracing::warn!("[zhugeliang] Bug #{} Vision 分析失败: {}", bid, e);
+                                }
+                            }
+                        }
+                    }
+                    (title, full_text, module, reporter)
                 }
                 Err(e) => {
                     tracing::warn!("[zhugeliang] 获取 Bug #{} 详情失败: {}", bid, e);
@@ -1428,16 +1460,15 @@ impl AgentExecutor {
              1. **先根据上面的模块索引**，根据 Bug 关键词找到目标模块\n\
              2. **最多读 5 个关键文件**（Controller + ServiceImpl + Mapper）\n\
              3. **不要大面积搜索代码**，基于描述和索引直接定位\n\
-             4. 分析足够就直接输出结论\n\
-             请仔细阅读 Bug 描述和重现步骤，理解用户遇到的实际问题。\n\n\
-             ## Bug 信息\n\
-             - **编号**: Bug #{}\n\
-             - **标题**: {}\n\
-             - **模块**: {}\n\
-             - **重现步骤**:\n{}\n\n\
+             4. 分析足够就直接输出结论\n\n\
+             ## 禅道 Bug 完整信息（含附图分析）\n\
+             {}\n\n\
              ## 请按以下格式输出\n\n\
              ### 一、Bug 理解\n\
-             用 2-3 句话概括用户遇到了什么问题，期望的行为是什么。\n\n\
+             **必须完整复刻以下内容，不可省略：**\n\
+             1. 先原文引用禅道中的 Bug 标题、重现步骤、期望结果\n\
+             2. 如果有附图分析，引用图片中识别到的关键信息（错误提示、异常界面等）\n\
+             3. 最后用 2-3 句话综合总结：用户遇到了什么问题，在什么场景下发生，期望的正确行为是什么\n\n\
              ### 二、根因分析\n\
              分析最可能的技术原因（代码层面），列出可能涉及的文件和函数。\n\n\
              ### 三、修复方案\n\
@@ -1445,7 +1476,7 @@ impl AgentExecutor {
              ### 四、路由决策\n\
              FIXER: guanyu 或 zhaoyun 或 xunyu\n\
              REASON: 一句话说明为什么交给这个角色",
-            module_index, bid, bug_title, bug_module, bug_steps.chars().take(2000).collect::<String>()
+            module_index, bug_full_text
         );
 
         let bid_clone = bid.clone();
@@ -1492,7 +1523,7 @@ impl AgentExecutor {
                 .unwrap_or_else(|| "LLM 分析决策".to_string());
             (fixer, reason_str, llm_output.clone())
         } else {
-            let combined = format!("{} {} {}", bug_title, bug_steps, bug_module).to_lowercase();
+            let combined = format!("{} {}", bug_title, bug_full_text).to_lowercase();
             let fe = ["vue","前端","界面","页面","按钮","下拉框","显示","组件","路由","菜单","页签"];
             let be = ["java","spring","controller","service","mapper","sql","null","npe","编译","maven"];
             let is_fe = fe.iter().any(|k| combined.contains(k));
@@ -1514,8 +1545,18 @@ impl AgentExecutor {
         let event = PipelineEvent::Handoff { bug_id: bid.clone(), from: "zhugeliang".into(), to: target_fixer.into(), stage: "pre_analyze".into() };
         self.publish_trace("pipeline", "handoff", &format!("Bug#{}", bid), &event.to_json(), "ok", 0).await;
 
-        // Step 6: 记录路由信息（不再直接推送到修复队列，由修复人员主动扫描分析文档）
-        tracing::info!("[zhugeliang] Bug #{} 分析完成，路由: {} ({})", bid, target_fixer, reason);
+        // Step 6: 框架读取分析文档中的 FIXER_ID，自动分配给对应修复人员
+        tracing::info!("[zhugeliang] Bug #{} 分析完成，FIXER_ID={} ({})", bid, target_fixer, reason);
+        let fix_task = serde_json::json!({
+            "agent_id": target_fixer,
+            "message": format!("请修复 Bug #{}（诸葛亮分析完成，分配给你）\n\n{}", bid, analysis_report),
+            "source": "zhugeliang_assign", "sender_id": "zhugeliang", "bug_reporter": _reporter,
+            "msg_id": format!("zhugeliang-assign-{}-{}", bid, chrono::Local::now().timestamp()),
+            "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "chat_id": "", "is_dm": "true",
+        });
+        let queue = format!("agent-work-queue:fix:{}", target_fixer);
+        let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, fix_task.to_string()).await;
         let _ = self.feishu.send(&format!("🔍 诸葛亮分析完成 Bug #{} → {} ({})\n📄 分析文档: MD/bugs/BUG_{}_ANALYSIS.md", bid, target_fixer, reason, bid), None).await;
 
         // Step 7: 留档到 MD/bugs/ 并 git commit（铁律：不论能否修复，必须先提交分析）
