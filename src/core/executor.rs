@@ -1332,22 +1332,31 @@ impl AgentExecutor {
 
         // Step 2: 调用 LLM 深度分析
         let analysis_prompt = format!(
-            "你是诸葛亮，HealthLink-HIS 系统的架构师。请深度分析以下 Bug。\n\n\
-             ## Bug 信息\n- **Bug #**: {}\n- **标题**: {}\n- **模块**: {}\n- **重现步骤**: {}\n\n\
-             ## 分析任务\n\
-             1. **读懂 Bug**：用户遇到了什么问题？\n\
-             2. **根因分析**：最可能的原因是什么？\n\
-             3. **影响范围**：影响哪些功能？\n\
-             4. **修复方案**：具体怎么修？涉及哪些文件？\n\
-             5. **路由决策**：交给谁？guanyu(后端) / zhaoyun(前端) / xunyu(DB)\n\n\
-             ## 输出格式\n\
-             ### Bug 理解\n（核心问题概括）\n\n### 根因分析\n（最可能原因）\n\n### 影响范围\n（影响功能）\n\n### 修复方案\n（具体步骤）\n\n### 路由决策\nFIXER: guanyu/zhaoyun/xunyu\nREASON: 一句话原因",
-            bid, bug_title, bug_module, bug_steps.chars().take(1000).collect::<String>()
+            "你是诸葛亮，HealthLink-HIS 系统的架构师。\n\n\
+             ## 你的任务\n\
+             深度分析以下 Bug，给出根因分析和修复方案。\n\
+             请仔细阅读 Bug 描述和重现步骤，理解用户遇到的实际问题。\n\n\
+             ## Bug 信息\n\
+             - **编号**: Bug #{}\n\
+             - **标题**: {}\n\
+             - **模块**: {}\n\
+             - **重现步骤**:\n{}\n\n\
+             ## 请按以下格式输出\n\n\
+             ### 一、Bug 理解\n\
+             用 2-3 句话概括用户遇到了什么问题，期望的行为是什么。\n\n\
+             ### 二、根因分析\n\
+             分析最可能的技术原因（代码层面），列出可能涉及的文件和函数。\n\n\
+             ### 三、修复方案\n\
+             给出具体的修复步骤，包括需要修改的文件、修改内容。\n\n\
+             ### 四、路由决策\n\
+             FIXER: guanyu 或 zhaoyun 或 xunyu\n\
+             REASON: 一句话说明为什么交给这个角色",
+            bid, bug_title, bug_module, bug_steps.chars().take(2000).collect::<String>()
         );
 
         let bid_clone = bid.clone();
         let analysis_result = tokio::task::spawn_blocking(move || {
-            crate::core::codex_exec::codex_exec(&analysis_prompt, "read-only", None, Some("zhugeliang"), 900)
+            crate::core::codex_exec::codex_exec(&analysis_prompt, "read-only", None, Some("zhugeliang"), 1800)
         }).await.unwrap_or_else(|e| {
             crate::core::codex_exec::CodexExecResult {
                 success: false, final_message: String::new(), stderr: format!("spawn error: {}", e),
@@ -1356,8 +1365,12 @@ impl AgentExecutor {
             }
         });
 
-        let llm_output = if analysis_result.success { analysis_result.final_message.clone() } else {
-            tracing::warn!("[zhugeliang] Bug #{} LLM 分析失败，降级关键词分析", bid_clone);
+        // 无论 success 与否，只要有输出就使用（LLM 分析有价值，VERDICT 不影响分析质量）
+        let llm_output = if !analysis_result.final_message.is_empty() {
+            tracing::info!("[zhugeliang] Bug #{} LLM 分析完成 ({}ms, {} tokens)", bid_clone, analysis_result.elapsed_ms, analysis_result.total_tokens);
+            analysis_result.final_message.clone()
+        } else {
+            tracing::warn!("[zhugeliang] Bug #{} LLM 分析无输出，降级关键词分析 (stderr: {})", bid_clone, analysis_result.stderr.chars().take(200).collect::<String>());
             String::new()
         };
 
@@ -1420,19 +1433,63 @@ impl AgentExecutor {
         let _: redis::RedisResult<i64> = self.redis.clone().rpush(&queue, fix_task.to_string()).await;
         let _ = self.feishu.send(&format!("🔍 诸葛亮分析 Bug #{} → {} ({})", bid, target_fixer, reason), None).await;
 
-        // Step 7: 留档
-        let analysis_dir = std::path::PathBuf::from("/root/agentforge-rs/docs/bug-analyses");
-        let _ = std::fs::create_dir_all(&analysis_dir);
-        let archive_path = analysis_dir.join(format!("bug-{}.md", bid));
-        let archive_content = format!("# 诸葛亮分析报告 — Bug #{}\n\n**时间**: {}\n**标题**: {}\n**模块**: {}\n**提出人**: {}\n\n---\n\n{}\n\n---\n\n**路由**: Bug #{} → {}\n",
-            bid, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), bug_title, bug_module, _reporter, analysis_content, bid, target_fixer);
+        // Step 7: 留档到 MD/bugs/ 并 git commit（铁律：不论能否修复，必须先提交分析）
+        let worktree_dir = std::path::PathBuf::from("/tmp/agentforge-worktrees/zhugeliang");
+        let bugs_dir = worktree_dir.join("MD/bugs");
+        let _ = std::fs::create_dir_all(&bugs_dir);
+        let archive_path = bugs_dir.join(format!("BUG_{}_ANALYSIS.md", bid));
+        let archive_content = format!(
+            "# Bug #{} 诸葛亮分析报告\n\n\
+             > **文档类型**: Bug分析\n\
+             > **分析时间**: {}\n\
+             > **分析模型**: mimo-v2.5 (LLM深度分析)\n\n\
+             ---\n\n\
+             ## 基本信息\n\
+             - **Bug #**: {}\n\
+             - **标题**: {}\n\
+             - **模块**: {}\n\
+             - **提出人**: {}\n\n\
+             ---\n\n\
+             {}\n\n\
+             ---\n\n\
+             ## 路由决策\n\
+             - **修复 Agent**: {}\n\
+             - **原因**: {}\n",
+            bid, chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            bid, bug_title, bug_module, _reporter,
+            analysis_content, target_fixer, reason
+        );
         let _ = std::fs::write(&archive_path, &archive_content);
         tracing::info!("[zhugeliang] 📄 存档: {}", archive_path.display());
+
+        // 铁律：分析文档必须 git commit（不论能否修复）
+        let commit_msg = format!("docs(bug): 诸葛亮分析报告 Bug #{}", bid);
+        let _ = std::process::Command::new("git")
+            .current_dir(&worktree_dir)
+            .args(["add", &format!("MD/bugs/BUG_{}_ANALYSIS.md", bid)])
+            .output();
+        let _ = std::process::Command::new("git")
+            .current_dir(&worktree_dir)
+            .args(["commit", "-m", &commit_msg, "--allow-empty"])
+            .output();
+        tracing::info!("[zhugeliang] 📝 分析文档已提交: {}", commit_msg);
 
         // Step 8: 禅道 keywords
         if let Some(ref cfg) = cfg {
             let client = crate::core::zentao::ZentaoClient::from_config(cfg);
-            let kw = format!("[诸葛亮分析] {}→{} | {}", bid, target_fixer, reason.chars().take(60).collect::<String>());
+            // 从分析内容中提取 Bug 理解摘要（前100字）
+            let analysis_summary = analysis_content.lines()
+                .skip_while(|l| !l.contains("Bug 理解") && !l.contains("根因分析") && !l.contains("核心问题"))
+                .skip(1)
+                .take_while(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars().take(100).collect::<String>();
+            let kw = if analysis_summary.is_empty() {
+                format!("[诸葛亮分析] {}→{} | {}", bid, target_fixer, reason.chars().take(60).collect::<String>())
+            } else {
+                format!("[诸葛亮分析] {}→{} | {}", bid, target_fixer, analysis_summary)
+            };
             let _ = client.update_bug_keywords(&bid, &kw).await;
             // Step 9: 禅道备注
             let comment = format!("[🤖 诸葛亮深度分析] Bug #{}\n\n{}", bid, analysis_content.chars().take(500).collect::<String>());

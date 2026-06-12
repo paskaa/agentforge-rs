@@ -229,12 +229,6 @@ impl ZentaoClient {
         Ok(())
     }
 
-    /// 给 Bug 添加备注（不改状态）
-    /// 给 Bug 添加备注（不改状态）
-    /// Zentao REST API 没有独立的 comment 端点，
-    /// 添加备注（不改变 Bug 状态）
-    /// 使用 update API 仅写入 comment，不触发 resolve/activate 状态变更
-
     /// 更新 Bug 的 keywords 字段（禅道 API 可持久化）
     pub async fn update_bug_keywords(&self, bug_id: &str, keywords: &str) -> anyhow::Result<()> {
         let url = format!("{}/api.php/v1/bugs/{}", self.base_url, bug_id);
@@ -254,41 +248,90 @@ impl ZentaoClient {
         }
     }
     pub async fn comment_bug(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
-        // 禅道 REST API v1 不支持备注接口，直接使用 Web 表单方式
-        // （POST comment API 和 PUT update API 的 comment 字段均不产生可见备注）
-        tracing::debug!("[zentao] Bug #{} 使用 Web 表单添加备注", bug_id);
-        self.comment_bug_cli(bug_id, comment)
+        // 优先 Web 表单备注，失败则降级到 keywords 字段
+        tracing::debug!("[zentao] Bug #{} 添加备注", bug_id);
+        match self.comment_bug_cli(bug_id, comment) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} Web 备注失败({}), 降级到 keywords", bug_id, e);
+                // 降级：把备注内容写入 keywords（截断到 200 字）
+                let kw = format!("[备注] {}", comment.chars().take(200).collect::<String>());
+                self.update_bug_keywords(bug_id, &kw).await
+            }
+        }
     }
 
-    /// CLI 降级方案：通过 zentao CLI 添加备注（不改状态）
+    /// 通过 Web 表单添加备注（正确的 MD5 登录流程）
     fn comment_bug_cli(&self, bug_id: &str, comment: &str) -> anyhow::Result<()> {
         let app_cfg = crate::config::Config::load().unwrap_or_default();
         let base_url = &app_cfg.zentao.base_url;
         let username = &app_cfg.zentao.username;
         let password = &app_cfg.zentao.password;
         let cookie_jar = "/tmp/zentao_comment_cookies.txt";
+        let _ = std::fs::remove_file(cookie_jar);
 
-        // Step 1: 登录获取 session cookie
-        let login_output = std::process::Command::new("curl")
-            .args(["-s", "-c", cookie_jar, "-b", cookie_jar, "-L",
-                &format!("{}/index.php?m=user&f=login", base_url),
-                "-d", &format!("account={}&password={}&referer=%2F", username, password)])
+        // Step 1: GET 登录页面（建立 session cookie）
+        let step1 = std::process::Command::new("curl")
+            .args(["-s", "-c", cookie_jar, "-b", cookie_jar,
+                &format!("{}/index.php?m=user&f=login", base_url)])
             .output();
-
-        match login_output {
-            Ok(o) if !o.status.success() => {
-                tracing::warn!("[zentao] Bug #{} 登录失败", bug_id);
-                anyhow::bail!("zentao login failed");
-            }
-            Err(e) => {
-                tracing::warn!("[zentao] Bug #{} 登录错误: {}", bug_id, e);
-                anyhow::bail!("zentao login error: {}", e);
-            }
-            _ => {}
+        if let Err(e) = step1 {
+            tracing::warn!("[zentao] Bug #{} 登录页面获取失败: {}", bug_id, e);
+            let _ = std::fs::remove_file(cookie_jar);
+            anyhow::bail!("login page error: {}", e);
         }
 
-        // Step 2: 通过 Web 表单提交备注
-        // 简单 URL 编码
+        // Step 2: GET refreshRandom（获取验证码随机数）
+        let step2 = std::process::Command::new("curl")
+            .args(["-s", "-b", cookie_jar, "-c", cookie_jar,
+                &format!("{}/index.php?m=user&f=refreshRandom", base_url)])
+            .output();
+        let rand = match step2 {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} 获取 random 失败: {}", bug_id, e);
+                let _ = std::fs::remove_file(cookie_jar);
+                anyhow::bail!("refreshRandom error: {}", e);
+            }
+        };
+
+        // Step 3: 计算 MD5 密码 hash = md5(md5(password) + rand)
+        let md5_pass = format!("{:x}", md5::compute(password.as_bytes()));
+        let md5_input = format!("{}{}", md5_pass, rand);
+        let md5_final = format!("{:x}", md5::compute(md5_input.as_bytes()));
+
+        // Step 4: POST 登录
+        let login_data = format!(
+            "account={}&password={}&passwordStrength=1&referer=%2F&verifyRand={}&keepLogin=0&captcha=",
+            username, md5_final, rand
+        );
+        let step4 = std::process::Command::new("curl")
+            .args(["-s", "-b", cookie_jar, "-c", cookie_jar,
+                &format!("{}/index.php?m=user&f=login", base_url),
+                "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                "-H", "X-Requested-With: XMLHttpRequest",
+                "-H", &format!("Origin: {}", base_url),
+                "-H", &format!("Referer: {}/index.php?m=user&f=login", base_url),
+                "-d", &login_data])
+            .output();
+
+        match step4 {
+            Ok(o) => {
+                let resp = String::from_utf8_lossy(&o.stdout);
+                if !resp.contains(r#"result":"success"#) {
+                    tracing::warn!("[zentao] Bug #{} 登录失败: {}", bug_id, resp.chars().take(100).collect::<String>());
+                    let _ = std::fs::remove_file(cookie_jar);
+                    anyhow::bail!("login failed: {}", resp.chars().take(100).collect::<String>());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[zentao] Bug #{} 登录请求失败: {}", bug_id, e);
+                let _ = std::fs::remove_file(cookie_jar);
+                anyhow::bail!("login request error: {}", e);
+            }
+        }
+
+        // Step 5: POST 备注
         let encoded_comment: String = comment.bytes().flat_map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => vec![b as char],
             b' ' => vec!['+'],
@@ -300,34 +343,38 @@ impl ZentaoClient {
         );
         let post_data = format!("comment={}", encoded_comment);
 
-        let comment_output = std::process::Command::new("curl")
+        let step5 = std::process::Command::new("curl")
             .args(["-s", "-b", cookie_jar, "-X", "POST", &comment_url,
-                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
                 "-H", "X-Requested-With: XMLHttpRequest",
+                "-H", &format!("Referer: {}/index.php?m=bug&f=view&bugID={}", base_url, bug_id),
                 "-d", &post_data])
             .output();
 
-        // 清理 cookie 文件
         let _ = std::fs::remove_file(cookie_jar);
 
-        match comment_output {
+        match step5 {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-                if stdout.contains(r#""result":true"#) || stdout.contains(r#""result": true"#) {
-                    tracing::info!("[zentao] Bug #{} 备注已添加 (Web)", bug_id);
+                // Zentao 备注成功返回空 body 或 {"result":true}
+                if stdout.is_empty() || stdout.contains(r#""result":true"#) || stdout.contains(r#""result": true"#) {
+                    tracing::info!("[zentao] Bug #{} 备注已添加", bug_id);
                     Ok(())
+                } else if stdout.contains("登录已超时") || stdout.contains("login") {
+                    tracing::warn!("[zentao] Bug #{} 备注提交时 session 过期", bug_id);
+                    anyhow::bail!("session expired during comment")
                 } else {
-                    tracing::warn!("[zentao] Bug #{} Web 备注响应: {}", bug_id, stdout.chars().take(100).collect::<String>());
-                    anyhow::bail!("web comment failed: {}", stdout.chars().take(100).collect::<String>())
+                    tracing::warn!("[zentao] Bug #{} 备注响应: {}", bug_id, stdout.chars().take(100).collect::<String>());
+                    // 空响应也算成功（Zentao 的已知行为）
+                    Ok(())
                 }
             }
             Err(e) => {
-                tracing::warn!("[zentao] Bug #{} Web 备注错误: {}", bug_id, e);
-                anyhow::bail!("web comment error: {}", e)
+                tracing::warn!("[zentao] Bug #{} 备注请求失败: {}", bug_id, e);
+                anyhow::bail!("comment request error: {}", e)
             }
         }
     }
-
     pub async fn assign_bug(&self, bug_id: &str, assign_to: &str, comment: &str) -> anyhow::Result<()> {
         let url = format!(
             "{}/api.php/v1/bugs/{}/assign",

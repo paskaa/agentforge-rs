@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 thiserror = "1"
 base64 = "0.22"
+md5 = "0.7"
 
 # SQL validation for MyBatis Mapper XML files
 sqlparser = { version = "0.62",  }

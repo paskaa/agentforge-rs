@@ -311,7 +311,7 @@ pub fn codex_exec(
 
     // 停滞检测：无新输出超过 480 秒（8 分钟）则杀进程
     // 总上限通过 timeout_secs 控制（默认 1800s = 30 分钟）
-    let stall_timeout = std::time::Duration::from_secs(480);
+    let stall_timeout = std::time::Duration::from_secs(900);
 
     loop {
         match child.try_wait() {
@@ -323,15 +323,34 @@ pub fn codex_exec(
             Ok(None) => {
                 // 检查总体超时
                 if start.elapsed() > timeout_duration {
-                    tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex", effective_timeout);
+                    tracing::warn!("[codex_exec] TIMEOUT after {}s — killing codex, capturing partial output", effective_timeout);
                     let _ = child.kill();
                     let _ = child.wait();
+                    // 超时前先提取已收集的部分输出（可能包含 LLM 分析结果）
+                    let partial_stdout = if let Ok(guard) = stdout_buf.lock() {
+                        String::from_utf8_lossy(&guard).to_string()
+                    } else { String::new() };
+                    let partial_stderr = if let Ok(guard) = stderr_buf.lock() {
+                        String::from_utf8_lossy(&guard).to_string()
+                    } else { String::new() };
+                    // 从 JSON 输出中提取 final_message
+                    let partial_final = partial_stdout.lines()
+                        .filter_map(|line| { serde_json::from_str::<serde_json::Value>(line).ok() })
+                        .filter(|j| j.get("type").and_then(|t| t.as_str()) == Some("message"))
+                        .last()
+                        .and_then(|j| j.get("content").and_then(|c| c.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_else(|| {
+                            // 降级：取最后 2000 字节的原始输出
+                            let tail = partial_stdout.chars().rev().take(4000).collect::<Vec<_>>();
+                            tail.into_iter().rev().collect()
+                        });
+                    tracing::info!("[codex_exec] Captured {} bytes partial output", partial_final.len());
                     return CodexExecResult {
-                        success: false, final_message: String::new(),
-                        verdict: Verdict::Fail(format!("timeout after {}s", effective_timeout)),
+                        success: false, final_message: partial_final,
+                        verdict: Verdict::Fail(format!("timeout after {}s (partial output captured)", effective_timeout)),
                         events: vec![], total_tokens: 0,
                         elapsed_ms: start.elapsed().as_millis() as u64,
-                        stderr: format!("codex timed out after {}s", effective_timeout),
+                        stderr: partial_stderr,
                     };
                 }
                 // 检查停滞：有输出活动则不杀
