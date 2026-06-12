@@ -441,10 +441,13 @@ impl AgentExecutor {
         // ── 铁律: 修复前必须有诸葛亮分析文档 ──
         let fixers = ["guanyu", "zhaoyun", "xunyu"];
         if fixers.contains(&self.agent_id.as_str()) {
-            let analysis_path = format!("/tmp/agentforge-worktrees/{}/MD/bugs/BUG_{}_ANALYSIS.md", self.agent_id, bug_id);
-            let has_analysis = std::path::Path::new(&analysis_path).exists() && {
-                std::fs::read_to_string(&analysis_path).map(|s| s.len() > 200).unwrap_or(false)
-            };
+            // 分析文档在 zhugeliang worktree（诸葛亮产出），也同步到自己 worktree
+            let analysis_path_zg = format!("/tmp/agentforge-worktrees/zhugeliang/MD/bugs/BUG_{}_ANALYSIS.md", bug_id);
+            let analysis_path_self = format!("/tmp/agentforge-worktrees/{}/MD/bugs/BUG_{}_ANALYSIS.md", self.agent_id, bug_id);
+            let has_analysis = (std::path::Path::new(&analysis_path_zg).exists() &&
+                std::fs::read_to_string(&analysis_path_zg).map(|s| s.len() > 200).unwrap_or(false))
+                || (std::path::Path::new(&analysis_path_self).exists() &&
+                std::fs::read_to_string(&analysis_path_self).map(|s| s.len() > 200).unwrap_or(false));
             if !has_analysis {
                 // 没有分析文档 → 跳过，等诸葛亮分析完成后再由扫描器入队
                 tracing::info!("[{}] Bug#{} 无分析文档，跳过（等诸葛亮分析）", self.agent_id, bug_id);
