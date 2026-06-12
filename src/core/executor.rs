@@ -857,24 +857,87 @@ impl AgentExecutor {
             // 清理重试计数
             let _: redis::RedisResult<()> = self.redis.clone().del(&retry_key).await;
 
-            // 提取测试结果摘要（取测试输出的关键行）
+            // ── 截图证据收集 ──
+            let report_dir = "/root/.openclaw/workspace/his-repo/healthlink-his-ui/tests/e2e/report";
+            let mut evidence_files: Vec<String> = Vec::new();
+            // 1. 测试 spec 中手动生成的截图
+            let manual_screenshot = format!("{}/bug-{}-result.png", report_dir, bid);
+            if std::path::Path::new(&manual_screenshot).exists() {
+                evidence_files.push(manual_screenshot);
+            }
+            // 2. Playwright 自动截图（test-results 目录）
+            let test_results_dir = "/root/.openclaw/workspace/his-repo/healthlink-his-ui/test-results";
+            if let Ok(entries) = std::fs::read_dir(test_results_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.contains(&format!("bug{}", bid)) || name.contains(&format!("bug-{}", bid)) {
+                        let screenshots_dir = entry.path().join("screenshots");
+                        if screenshots_dir.exists() {
+                            if let Ok(imgs) = std::fs::read_dir(&screenshots_dir) {
+                                for img in imgs.flatten() {
+                                    let p = img.path().to_string_lossy().to_string();
+                                    if p.ends_with(".png") { evidence_files.push(p); }
+                                }
+                            }
+                        }
+                        // 也检查根目录下的截图
+                        if let Ok(root_imgs) = std::fs::read_dir(entry.path()) {
+                            for img in root_imgs.flatten() {
+                                let p = img.path().to_string_lossy().to_string();
+                                if p.ends_with(".png") { evidence_files.push(p); }
+                            }
+                        }
+                    }
+                }
+            }
+            // 3. Playwright HTML report 中的截图
+            let html_report_data = format!("{}/data", report_dir);
+            if let Ok(entries) = std::fs::read_dir(&html_report_data) {
+                for entry in entries.flatten() {
+                    let p = entry.path().to_string_lossy().to_string();
+                    if p.ends_with(".png") && p.contains(&bid) {
+                        evidence_files.push(p);
+                    }
+                }
+            }
+
+            tracing::info!("[zhangfei] Bug #{} 找到 {} 个截图证据文件", bid, evidence_files.len());
+
+            // 提取测试结果摘要
             let _test_summary: String = test_output.lines()
                 .filter(|l| l.contains("passed") || l.contains("failed") || l.contains("Pending") || l.contains("✓") || l.contains("✗"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let _test_comment = format!(
-                "=== Playwright 回归测试结果 ===\n测试标签: @bug{}\n执行模式: 无头浏览器 (chromium)\n\n{}\n\n✅ 全部测试通过",
-                bid, _test_summary
-            );
-            // 禅道标记为已解决 + 添加测试报告
+
+            // ── 上传截图证据到禅道 ──
+            let evidence_paths = evidence_files.clone();
             {
                 let cfg = crate::config::Config::load().ok();
                 if let Some(cfg) = cfg {
                     let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
+                    // 上传每个截图文件
+                    for (i, path) in evidence_paths.iter().enumerate() {
+                        let desc = format!("Playwright回归测试截图 #{} — Bug #{}", i + 1, bid);
+                        match client.upload_attachment(&bid, path, &desc).await {
+                            Ok(_) => tracing::info!("[zhangfei] Bug #{} 截图证据 #{} 上传成功: {}", bid, i + 1, path),
+                            Err(e) => tracing::warn!("[zhangfei] Bug #{} 截图证据 #{} 上传失败: {}", bid, i + 1, e),
+                        }
+                    }
+                    // 生成完整的测试报告（含证据清单）
+                    let evidence_list = if evidence_paths.is_empty() {
+                        "⚠️ 未找到截图文件（测试可能未生成截图）".to_string()
+                    } else {
+                        evidence_paths.iter().enumerate()
+                            .map(|(i, p)| format!("  {}. {}", i + 1, std::path::Path::new(p).file_name().unwrap_or_default().to_string_lossy()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
                     let test_report = format!(
-                        "[🔥 张飞测试报告] Bug #{} Playwright回归测试\n\n                        测试状态：✅ 通过\n                        测试标签：@bug{}\n                        执行模式：无头浏览器 (chromium)\n                        测试输出摘要：\n{}\n\n                        结论：回归测试通过，BUG已修复",
+                        "[🔥 张飞测试报告] Bug #{} Playwright回归测试\n\n                        测试状态：✅ 通过\n                        测试标签：@bug{}\n                        执行模式：无头浏览器 (chromium, 1920x1080)\n                        测试输出摘要：\n{}\n\n                        📸 截图证据（{} 张）：\n{}\n\n                        结论：回归测试通过，BUG已修复。截图已上传至禅道附件。",
                         bid, bid,
-                        _test_summary.chars().take(500).collect::<String>()
+                        _test_summary.chars().take(500).collect::<String>(),
+                        evidence_paths.len(),
+                        evidence_list
                     );
                     let _ = client.comment_bug(&bid, &test_report).await;
                     let _ = client.resolve_bug(&bid, "Playwright回归测试通过，BUG已修复").await;

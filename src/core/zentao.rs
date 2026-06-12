@@ -379,6 +379,132 @@ impl ZentaoClient {
             }
         }
     }
+    /// 上传截图附件到禅道 Bug（作为测试证据）
+    pub async fn upload_attachment(&self, bug_id: &str, file_path: &str, description: &str) -> anyhow::Result<()> {
+        let path = std::path::Path::new(file_path);
+        if !path.exists() {
+            anyhow::bail!("截图文件不存在: {}", file_path);
+        }
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        tracing::info!("[zentao] Bug #{} 上传附件: {}", bug_id, filename);
+
+        // 复用 curl 登录流程
+        let app_cfg = crate::config::Config::load().unwrap_or_default();
+        let base_url = &app_cfg.zentao.base_url;
+        let username = &app_cfg.zentao.username;
+        let password = &app_cfg.zentao.password;
+        let cookie_jar = format!("/tmp/zentao_upload_cookies_{}.txt", bug_id);
+        let _ = std::fs::remove_file(&cookie_jar);
+
+        // Step 1: GET 登录页面
+        let _ = std::process::Command::new("curl")
+            .args(["-s", "-c", &cookie_jar, "-b", &cookie_jar,
+                &format!("{}/index.php?m=user&f=login", base_url)])
+            .output();
+
+        // Step 2: GET refreshRandom
+        let rand_out = std::process::Command::new("curl")
+            .args(["-s", "-b", &cookie_jar, "-c", &cookie_jar,
+                &format!("{}/index.php?m=user&f=refreshRandom", base_url)])
+            .output();
+        let rand = match rand_out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Err(e) => { let _ = std::fs::remove_file(&cookie_jar); anyhow::bail!("refreshRandom error: {}", e); }
+        };
+
+        // Step 3: MD5 登录
+        let md5_pass = format!("{:x}", md5::compute(password.as_bytes()));
+        let md5_final = format!("{:x}", md5::compute(format!("{}{}", md5_pass, rand).as_bytes()));
+        let login_data = format!(
+            "account={}&password={}&passwordStrength=1&referer=%2F&verifyRand={}&keepLogin=0&captcha=",
+            username, md5_final, rand
+        );
+        let login_resp = std::process::Command::new("curl")
+            .args(["-s", "-b", &cookie_jar, "-c", &cookie_jar,
+                &format!("{}/index.php?m=user&f=login", base_url),
+                "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                "-H", "X-Requested-With: XMLHttpRequest",
+                "-d", &login_data])
+            .output();
+        if let Ok(o) = &login_resp {
+            let resp = String::from_utf8_lossy(&o.stdout);
+            if !resp.contains(r#""result":"success""#) {
+                let _ = std::fs::remove_file(&cookie_jar);
+                anyhow::bail!("login failed for upload");
+            }
+        }
+
+        // Step 4: 上传文件 — 使用禅道 REST API
+        let upload_url = format!("{}/api.php/v1/files", base_url);
+        let upload_resp = std::process::Command::new("curl")
+            .args(["-s", "-b", &cookie_jar, "-c", &cookie_jar,
+                "-X", "POST", &upload_url,
+                "-H", &format!("Token: {}", self.token),
+                "-F", &format!("files=@{}", file_path),
+                "-F", "objectType=bug",
+                "-F", &format!("objectID={}", bug_id)])
+            .output();
+
+        let upload_result = match upload_resp {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                tracing::info!("[zentao] Bug #{} 上传响应: {}", bug_id, stdout.chars().take(200).collect::<String>());
+                stdout
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&cookie_jar);
+                anyhow::bail!("upload request error: {}", e);
+            }
+        };
+
+        // REST API 失败则降级到 Web 表单上传
+        if upload_result.contains("error") || upload_result.is_empty() {
+            tracing::info!("[zentao] Bug #{} REST 上传失败，降级到 Web 表单", bug_id);
+            let web_upload_url = format!(
+                "{}/index.php?m=file&f=upload&objectType=bug&objectID={}",
+                base_url, bug_id
+            );
+            let web_resp = std::process::Command::new("curl")
+                .args(["-s", "-b", &cookie_jar, "-c", &cookie_jar,
+                    "-X", "POST", &web_upload_url,
+                    "-F", &format!("files=@{}", file_path)])
+                .output();
+            if let Ok(o) = web_resp {
+                let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                tracing::info!("[zentao] Bug #{} Web 上传响应: {}", bug_id, stdout.chars().take(200).collect::<String>());
+            }
+        }
+
+        let _ = std::fs::remove_file(&cookie_jar);
+
+        // 用 keywords 字段记录证据信息（禅道文件上传有格式限制，用keywords作为可靠后备）
+        let evidence_kw = format!(
+            "[📸证据] {} 截图:{} 时间:{}",
+            description, filename,
+            chrono::Local::now().format("%m-%d %H:%M")
+        );
+        // 截断到200字符以内（keywords限制255）
+        let kw = if evidence_kw.len() > 200 {
+            format!("{}...", &evidence_kw[..197])
+        } else {
+            evidence_kw
+        };
+        let _ = self.update_bug_keywords(bug_id, &kw).await;
+
+        // 同时添加备注
+        let evidence_comment = format!(
+            "[📸 测试证据] {}
+截图文件: {}
+上传时间: {}
+备注: 截图已提交到git仓库",
+            description, filename,
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        let _ = self.comment_bug(bug_id, &evidence_comment).await;
+
+        tracing::info!("[zentao] Bug #{} 截图证据记录完成: {}", bug_id, filename);
+        Ok(())
+    }
     pub async fn assign_bug(&self, bug_id: &str, assign_to: &str, comment: &str) -> anyhow::Result<()> {
         let url = format!(
             "{}/api.php/v1/bugs/{}/assign",

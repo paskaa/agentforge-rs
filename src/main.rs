@@ -86,6 +86,15 @@ enum Cli {
         #[arg(long, default_value = "3100")]
         port: u16,
     },
+    /// Upload screenshot evidence to Zentao bug
+    UploadEvidence {
+        #[arg(long)]
+        bug_id: String,
+        #[arg(long)]
+        file: String,
+        #[arg(long, default_value = "Playwright回归测试截图")]
+        description: String,
+    },
 }
 
 #[tokio::main]
@@ -388,6 +397,14 @@ async fn main() -> anyhow::Result<()> {
         Cli::Web { port } => {
             let pool = sqlx::SqlitePool::connect("sqlite:///var/lib/agentforge/traces.db?mode=rwc").await.ok();
             agentforge::core::web_server::start_web_server(pool, port).await?;
+        }
+        Cli::UploadEvidence { bug_id, file, description } => {
+            let cfg = agentforge::config::Config::load()?;
+            let client = agentforge::core::zentao::ZentaoClient::from_config(&cfg);
+            match client.upload_attachment(&bug_id, &file, &description).await {
+                Ok(_) => println!("✅ 截图证据已上传到禅道 Bug #{}: {}", bug_id, file),
+                Err(e) => eprintln!("❌ 上传失败: {}", e),
+            }
         }
     }
 
