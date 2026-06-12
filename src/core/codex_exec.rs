@@ -266,6 +266,7 @@ pub fn codex_exec(
     let stderr_clone = std::sync::Arc::clone(&stderr_buf);
     let activity_clone = std::sync::Arc::clone(&last_activity);
     let activity_clone2 = std::sync::Arc::clone(&last_activity);
+    let last_activity2 = std::sync::Arc::clone(&last_activity);
 
     let stdout_thread = std::thread::spawn(move || {
         use std::io::Read;
@@ -355,10 +356,11 @@ pub fn codex_exec(
                 }
                 // 检查停滞：无输出但子进程仍在运行（LLM 推理中），不杀进程
                 // 只依赖总体超时 (timeout_duration) 来终止，停滞检测仅用于日志
-                let idle = if let Ok(guard) = last_activity.lock() {
-                    guard.elapsed()
-                } else {
-                    std::time::Duration::from_secs(0)
+                // 取 stdout 和 stderr 最近活动时间的最大值（stderr 有 API 调用也算活跃）
+                let idle = {
+                    let stdout_idle = last_activity.lock().map(|g| g.elapsed()).unwrap_or(std::time::Duration::from_secs(0));
+                    let stderr_idle = last_activity2.lock().map(|g| g.elapsed()).unwrap_or(std::time::Duration::from_secs(0));
+                    std::cmp::min(stdout_idle, stderr_idle)
                 };
                 if idle > stall_timeout {
                     // 检查子进程是否还活着且有 CPU 活动

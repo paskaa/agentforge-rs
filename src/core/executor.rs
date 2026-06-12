@@ -1334,7 +1334,12 @@ impl AgentExecutor {
         let analysis_prompt = format!(
             "你是诸葛亮，HealthLink-HIS 系统的架构师。\n\n\
              ## 你的任务\n\
-             深度分析以下 Bug，给出根因分析和修复方案。\n\
+             分析以下 Bug 并给出根因和修复方案。\n\
+             **重要规则：**\n\
+             1. **先读 `MD/MODULE_INDEX.md`**，根据 Bug 关键词找到目标模块\n\
+             2. **最多读 5 个关键文件**（Controller + ServiceImpl + Mapper）\n\
+             3. **不要大面积搜索代码**，基于描述和索引直接定位\n\
+             4. 分析足够就直接输出结论\n\
              请仔细阅读 Bug 描述和重现步骤，理解用户遇到的实际问题。\n\n\
              ## Bug 信息\n\
              - **编号**: Bug #{}\n\
