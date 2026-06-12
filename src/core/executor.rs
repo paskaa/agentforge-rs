@@ -446,21 +446,8 @@ impl AgentExecutor {
                 std::fs::read_to_string(&analysis_path).map(|s| s.len() > 200).unwrap_or(false)
             };
             if !has_analysis {
-                // 没有分析文档 → 转给诸葛亮先分析
-                tracing::info!("[{}] Bug#{} 无分析文档，转给诸葛亮先分析", self.agent_id, bug_id);
-                let zg_queue = "agent-work-queue:fix:zhugeliang".to_string();
-                let task = serde_json::json!({
-                    "agent_id": "zhugeliang",
-                    "message": format!("请分析 Bug #{} 并设计修复方案，然后路由给合适的修复 Agent 执行。\nBug 标题: {}", bug_id,
-                        msg.lines().find(|l| l.contains("Bug #")).unwrap_or("")),
-                    "source": "pipeline_pre_analyze",
-                    "sender_id": &self.agent_id,
-                    "chat_id": "", "is_dm": "true",
-                    "msg_id": format!("redirect-analyze-{}-{}", bug_id, chrono::Local::now().timestamp()),
-                    "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
-                });
-                let _: redis::RedisResult<i64> = self.redis.clone().rpush(&zg_queue, task.to_string()).await;
-                let _ = self.feishu.send(&format!("🔄 Bug#{} 无分析文档，已转给诸葛亮先行分析", bug_id), None).await;
+                // 没有分析文档 → 跳过，等诸葛亮分析完成后再由扫描器入队
+                tracing::info!("[{}] Bug#{} 无分析文档，跳过（等诸葛亮分析）", self.agent_id, bug_id);
                 return;
             }
         }
