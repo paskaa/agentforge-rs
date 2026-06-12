@@ -371,6 +371,33 @@ impl AgentExecutor {
             }
         }
 
+        // ── 铁律: 修复前必须有诸葛亮分析文档 ──
+        let fixers = ["guanyu", "zhaoyun", "xunyu"];
+        if fixers.contains(&self.agent_id.as_str()) {
+            let analysis_path = format!("/tmp/agentforge-worktrees/{}/MD/bugs/BUG_{}_ANALYSIS.md", self.agent_id, bug_id);
+            let has_analysis = std::path::Path::new(&analysis_path).exists() && {
+                std::fs::read_to_string(&analysis_path).map(|s| s.len() > 200).unwrap_or(false)
+            };
+            if !has_analysis {
+                // 没有分析文档 → 转给诸葛亮先分析
+                tracing::info!("[{}] Bug#{} 无分析文档，转给诸葛亮先分析", self.agent_id, bug_id);
+                let zg_queue = "agent-work-queue:fix:zhugeliang".to_string();
+                let task = serde_json::json!({
+                    "agent_id": "zhugeliang",
+                    "message": format!("请分析 Bug #{} 并设计修复方案，然后路由给合适的修复 Agent 执行。\nBug 标题: {}", bug_id,
+                        msg.lines().find(|l| l.contains("Bug #")).unwrap_or("")),
+                    "source": "pipeline_pre_analyze",
+                    "sender_id": &self.agent_id,
+                    "chat_id": "", "is_dm": "true",
+                    "msg_id": format!("redirect-analyze-{}-{}", bug_id, chrono::Local::now().timestamp()),
+                    "timestamp": chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+                });
+                let _: redis::RedisResult<i64> = self.redis.clone().rpush(&zg_queue, task.to_string()).await;
+                let _ = self.feishu.send(&format!("🔄 Bug#{} 无分析文档，已转给诸葛亮先行分析", bug_id), None).await;
+                return;
+            }
+        }
+
         // ── 铁律 19: fix_start 去重 — 检查是否已在处理 ──
         let dedup_key = format!("fix_active:{}:{}", self.agent_id, bug_id);
         let already_active: bool = self.redis.clone().exists(&dedup_key).await.unwrap_or(false);
