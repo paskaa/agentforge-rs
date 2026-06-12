@@ -1515,17 +1515,65 @@ impl AgentExecutor {
             tracing::info!("[zhugeliang] 📄 存档: {}", archive_path.display());
         }
 
-        // 铁律：分析文档必须 git commit（不论能否修复）
+        // 铁律：分析文档必须 git commit + push（不论能否修复）
         let commit_msg = format!("docs(bug): 诸葛亮分析报告 Bug #{}", bid);
+        let bug_file = format!("MD/bugs/BUG_{}_ANALYSIS.md", bid);
+        // 先解决可能的冲突：stash 非分析文件的改动
         let _ = std::process::Command::new("git")
             .current_dir(&worktree_dir)
-            .args(["add", &format!("MD/bugs/BUG_{}_ANALYSIS.md", bid)])
+            .args(["checkout", "--", "."])
+            .output();
+        // 拉取最新
+        let _ = std::process::Command::new("git")
+            .current_dir(&worktree_dir)
+            .args(["fetch", "origin", "develop"])
             .output();
         let _ = std::process::Command::new("git")
+            .current_dir(&worktree_dir)
+            .args(["rebase", "origin/develop"])
+            .output();
+        // 强制 add 分析文件
+        let add_out = std::process::Command::new("git")
+            .current_dir(&worktree_dir)
+            .args(["add", "-f", &bug_file])
+            .output();
+        if let Err(e) = &add_out {
+            tracing::error!("[zhugeliang] git add 失败: {}", e);
+        }
+        // commit
+        let commit_out = std::process::Command::new("git")
             .current_dir(&worktree_dir)
             .args(["commit", "-m", &commit_msg, "--allow-empty"])
             .output();
-        tracing::info!("[zhugeliang] 📝 分析文档已提交: {}", commit_msg);
+        match &commit_out {
+            Ok(o) if o.status.success() => {
+                tracing::info!("[zhugeliang] 📝 分析文档已提交: {}", commit_msg);
+                // push 到远程
+                let push_out = std::process::Command::new("git")
+                    .current_dir(&worktree_dir)
+                    .args(["push", "origin", "zhugeliang:develop"])
+                    .output();
+                match &push_out {
+                    Ok(o) if o.status.success() => {
+                        tracing::info!("[zhugeliang] 🚀 已推送到 develop");
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        tracing::warn!("[zhugeliang] push 失败: {}", stderr.chars().take(200).collect::<String>());
+                    }
+                    Err(e) => {
+                        tracing::error!("[zhugeliang] push 命令失败: {}", e);
+                    }
+                }
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!("[zhugeliang] git commit 失败: {}", stderr.chars().take(200).collect::<String>());
+            }
+            Err(e) => {
+                tracing::error!("[zhugeliang] git commit 命令失败: {}", e);
+            }
+        }
 
         // Step 8: 禅道 keywords
         if let Some(ref cfg) = cfg {
