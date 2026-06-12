@@ -267,7 +267,7 @@ pub fn codex_exec(
     let activity_clone = std::sync::Arc::clone(&last_activity);
     let activity_clone2 = std::sync::Arc::clone(&last_activity);
 
-    let _stdout_thread = std::thread::spawn(move || {
+    let stdout_thread = std::thread::spawn(move || {
         use std::io::Read;
         if let Some(mut pipe) = stdout_pipe {
             let mut buf = [0u8; 4096];
@@ -287,7 +287,7 @@ pub fn codex_exec(
             }
         }
     });
-    let _stderr_thread = std::thread::spawn(move || {
+    let stderr_thread = std::thread::spawn(move || {
         use std::io::Read;
         if let Some(mut pipe) = stderr_pipe {
             let mut buf = [0u8; 4096];
@@ -444,6 +444,10 @@ pub fn codex_exec(
             }
         }
     }
+
+    // 等待读取线程完成（确保 pipe 中所有数据都已读入 buffer）
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
 
     // 从缓冲区读取 stdout/stderr
     stdout = stdout_buf.lock().map(|g| String::from_utf8_lossy(&g).to_string()).unwrap_or_default();
