@@ -194,7 +194,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
         let mut key_sections = Vec::new();
         let mut in_section = false;
         let mut section_buf = String::new();
-        let target_sections = ["根因分析", "修复方案", "修复 Agent", "FIXER_ID"];
+        let target_sections = ["根因分析", "FIXER_ID"];
         for line in analysis_doc.lines() {
             let trimmed = line.trim();
             let is_header = trimmed.starts_with("##") || trimmed.starts_with("**FIXER_ID");
@@ -213,9 +213,9 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
         if in_section && !section_buf.is_empty() { key_sections.push(section_buf); }
         let extracted = if key_sections.is_empty() {
             // fallback: 取前1500字符
-            analysis_doc.chars().take(1500).collect::<String>()
+            analysis_doc.chars().take(1000).collect::<String>()
         } else {
-            key_sections.join("\n")
+            key_sections.join("\n").chars().take(1500).collect::<String>()
         };
         format!(r#"## ⚠️ 诸葛亮分析报告（验证后再修复）
 - 分析正确 → 按方案修复
@@ -287,51 +287,12 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 ## 禅道 Bug 详情
 {bug_details}
 
-## Harness 修复指引（Bug-Driven Testing 流程）
-1. **Init**: 确认目录，读 AGENTS.md
-2. **Bug Analysis**: 读取禅道 Bug 全部信息（标题/步骤/截图/备注）
-3. **Test Design**: 根据 Bug 信息生成 Playwright 测试用例
-   - 从标题推断模块和路由
-   - 从复现步骤生成操作序列
-   - 从期望结果生成断言
-   - 生成文件：tests/e2e/specs/bug-{{id}}.spec.ts
-4. **Baseline Test**: 运行基线测试（预期失败，证明 Bug 存在）
-   - `npx playwright test --grep @bug{{id}}` → 预期 FAIL
-   - 如果通过 → 检查 develop 是否已修复，检查测试用例是否正确
-5. **Pre-check**: 检查 develop 上是否有该 bug 的历史修复提交
-   - 如果有：读之前的 commit diff，分析是否完整修复
-   - 如果之前修得不完整：指出遗漏点，重新全链路分析
-   - 如果之前修复完整：输出「之前修复已完成，无需改动」并退出
-6. **Full-chain (6 环)**: 无论是否已有修复，都跑一遍
-   - 前端/页面 → Controller → Service → Mapper → DB/SQL → 关联模块
-   - 涉及数据库字段时必走，查每个环节的字段映射
-   - ⚠️ 每环必须标记状态：【✅ 正常 / 🔧 已修改 / ❌ 遗漏】
-   - ⚠️ 如果只改了后端没改前端（或反之），说明分析不完整，重新检查
-7. **Fix**: 修改文件（用 apply_patch），一次修彻底
-   - ⚠️ 涉及新增 Entity 字段时，必须同时创建 DB 迁移脚本（sql/迁移记录-DB变更记录/YYYYMMDD_fix_BUG#XXXX_description.sql）
-   - ⚠️ 只改 Entity 不改 DB = 修复不完整，运行时 100% 报错
-   - ⚠️ 涉及交互流程（退回/审核/签发等）的 BUG，必须识别「发起方📤」（谁操作）和「接收方📥」（谁查看）
-     - 📤 发起方：检查操作入口→校验→API→Service→DB 是否完整
-     - 📥 接收方：检查 DB→Service→API→展示字段→页面列 是否完整
-     - 只修一端不修另一端 = 修复不完整
-8. **Regression Test**: 运行回归测试（预期通过，证明修复有效）
-   - `npx playwright test --grep @bug{{id}}` → 预期 PASS
-   - 如果失败 → 分析失败原因 → 返回 Step 7 重新修复
-9. **Verify**: 运行编译/语法检查 + 端到端数据流确认
-   - 编译检查：mvn compile / npm lint / cargo check / vue-tsc + vite build
-   - ⚠️ 数据流检查：从起点到终点每环确认数据能传过去
-     - 📤 录入链路：前端发送字段 → API 参数接收 → Service 读取 → DB 写入
-     - 📥 展示链路：DB 查询 → Service 返回 → API 响应 → 前端展示列
-   - ⚠️ 交互检查：涉及前端改动时确认弹窗/提示/跳转是否正常工作
-   - ⚠️ 两端核对：涉及交互流程的 BUG，用表格对比两端修复状态
-10. **Submit**: 输出变更摘要，格式：
-   ```
-   根因：
-   - ...
-   
-   修复：
-   - ...
-   ```
+## 修复流程
+1. 读 AGENTS.md 了解项目规范
+2. 全链路分析（6环）：前端→Controller→Service→Mapper→DB→关联模块
+3. 用 apply_patch 修改文件，一次修彻底
+4. 编译验证：vue-tsc + vite build（前端）或 mvn compile（后端）
+5. 输出变更摘要（根因 + 修复）
 
 请分析并直接修改文件修复。不要用 git。
 "#,
