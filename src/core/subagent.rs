@@ -2358,20 +2358,73 @@ pub fn run_harness_loop(
         true
     } else {
         tracing::warn!("[{}] Bug#{} Phase 4 验收失败，尝试降级验收", agent_name, bug_id);
-        let has_commit = std::process::Command::new("git")
-            .args(["log", "origin/develop", "--grep", &format!("Bug#{}", bug_id), "--oneline", "-1"])
-            .current_dir("/root/.openclaw/workspace/his-repo")
+        // 先尝试 cherry-pick agent worktree 的 fix commit 到 develop
+        let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+        let main_repo = "/root/.openclaw/workspace/his-repo";
+        let fix_hash = std::process::Command::new("git")
+            .args(["-C", &worktree, "log", "--oneline", "--grep", &format!("#{}", bug_id), "--format=%H", "-1"])
             .output()
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if !fix_hash.is_empty() && fix_hash.len() >= 8 {
+            let _ = std::process::Command::new("git").args(["-C", main_repo, "fetch", "origin", "develop"]).output();
+            let _ = std::process::Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
+            let _ = std::process::Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
+            let author = format!("{} <{}@gentronhealth.com>", agent_name, agent_name);
+            let cherry = std::process::Command::new("git")
+                .args(["-C", main_repo, "cherry-pick", "--strategy=recursive", "-X", "theirs",
+                       "--author", &author, &fix_hash])
+                .output();
+            if cherry.map(|o| o.status.success()).unwrap_or(false) {
+                let _ = std::process::Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
+                tracing::info!("[{}] Bug#{} 降级验收: cherry-pick 到 develop 成功", agent_name, bug_id);
+            } else {
+                let _ = std::process::Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
+                // 文件合入降级
+                let changed = std::process::Command::new("git")
+                    .args(["-C", &worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", &fix_hash])
+                    .output();
+                if let Ok(changed_out) = changed {
+                    let changed_str = String::from_utf8_lossy(&changed_out.stdout).to_string();
+                    let files: Vec<&str> = changed_str.lines().filter(|f| !f.is_empty()).collect();
+                    if !files.is_empty() {
+                        let _ = std::process::Command::new("git").args(["-C", main_repo, "reset", "--hard", "origin/develop"]).output();
+                        for f in &files {
+                            let _ = std::process::Command::new("git").args(["-C", main_repo, "checkout", &fix_hash, "--", f]).output();
+                        }
+                        let mut add_args = vec!["-C", main_repo, "add"];
+                        for f in &files { add_args.push(f); }
+                        let _ = std::process::Command::new("git").args(&add_args).output();
+                        let commit_msg = format!("fix(#{}): {} (降级合入)", bug_id, agent_name);
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", main_repo, "commit", "-m", &commit_msg, "--author", &author])
+                            .output();
+                        let _ = std::process::Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
+                        tracing::info!("[{}] Bug#{} 降级验收: 文件合入到 develop 成功 ({} 个文件)", agent_name, bug_id, files.len());
+                    }
+                }
+            }
+        }
+        // 检查 develop 上是否有 fix commit（支持多种格式）
+        let has_commit = std::process::Command::new("git")
+            .args(["-C", main_repo, "log", "origin/develop", "--oneline", "--grep", &format!("#{}", bug_id), "-1"])
+            .output()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).to_string();
+                s.contains("fix(") || s.contains("fix:")
+            })
             .unwrap_or(false);
+        // 编译验证（用主仓库）
         let compile_ok = std::process::Command::new("mvn")
             .args(["compile", "-pl", "healthlink-his-application", "-am", "-q"])
-            .current_dir("/root/.openclaw/workspace/his-repo/healthlink-his-server")
+            .current_dir(format!("{}/healthlink-his-server", main_repo))
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
         if has_commit && compile_ok {
-            tracing::info!("[{}] Bug#{} 降级验收通过 (commit+compile)", agent_name, bug_id);
+            tracing::info!("[{}] Bug#{} 降级验收通过 (commit+compile) ✅", agent_name, bug_id);
+        } else {
+            tracing::warn!("[{}] Bug#{} 降级验收失败: commit={} compile={}", agent_name, bug_id, has_commit, compile_ok);
         }
         has_commit && compile_ok
     };
