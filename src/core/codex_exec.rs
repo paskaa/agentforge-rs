@@ -73,6 +73,48 @@ impl Verdict {
     pub fn is_fail(&self) -> bool { matches!(self, Verdict::Fail(_)) }
 }
 
+// ═══ 全局并发控制：最多 MAX_CONCURRENT_CODEX 个 codex 同时调用模型 API ═══
+// mimo-v2.5 限制 2 个并发请求，超过会 429 Too many requests
+use std::sync::{Mutex, Condvar, atomic::{AtomicU32, AtomicBool, Ordering}};
+
+const MAX_CONCURRENT_CODEX: u32 = 2;
+
+static CODEX_SEM_COUNTER: AtomicU32 = AtomicU32::new(0);
+static CODEX_SEM_MTX: Mutex<()> = Mutex::new(());
+static CODEX_SEM_CV: Condvar = Condvar::new();
+static CODEX_SEM_INIT: AtomicBool = AtomicBool::new(false);
+
+fn codex_sem_acquire() {
+    loop {
+        let current = CODEX_SEM_COUNTER.load(Ordering::SeqCst);
+        if current < MAX_CONCURRENT_CODEX {
+            CODEX_SEM_COUNTER.fetch_add(1, Ordering::SeqCst);
+            tracing::debug!("[codex_sem] acquired ({}/{})", current + 1, MAX_CONCURRENT_CODEX);
+            return;
+        }
+        tracing::debug!("[codex_sem] waiting ({}/{} slots full)", current, MAX_CONCURRENT_CODEX);
+        let guard = CODEX_SEM_MTX.lock().unwrap();
+        let _guard = CODEX_SEM_CV.wait(guard).unwrap();
+    }
+}
+
+fn codex_sem_release() {
+    let prev = CODEX_SEM_COUNTER.fetch_sub(1, Ordering::SeqCst);
+    tracing::debug!("[codex_sem] released ({}/{})", prev - 1, MAX_CONCURRENT_CODEX);
+    // Wake up one waiter
+    if let Ok(guard) = CODEX_SEM_MTX.lock() {
+        CODEX_SEM_CV.notify_one();
+    }
+}
+
+/// 并发控制 Drop Guard — 自动释放信号量
+struct CodexSemGuard;
+impl Drop for CodexSemGuard {
+    fn drop(&mut self) {
+        codex_sem_release();
+    }
+}
+
 /// Codex 执行结果
 #[derive(Debug, Clone)]
 pub struct CodexExecResult {
@@ -199,6 +241,10 @@ pub fn codex_exec(
     timeout_secs: u64,
 ) -> CodexExecResult {
     let start = Instant::now();
+
+    // 铁律: 全局并发控制，防止模型 API 429
+    codex_sem_acquire();
+    let _sem_guard = CodexSemGuard;
 
     // 构建命令
     let mut cmd = Command::new("codex");
@@ -544,6 +590,7 @@ pub fn codex_exec(
         elapsed_ms,
         stderr,
     }
+    // _sem_guard drops here, releasing the semaphore
 }
 
 /// 获取 Agent 角色上下文 (注入到 prompt 中)
