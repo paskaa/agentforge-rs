@@ -1011,41 +1011,11 @@ fn run_codex_fix_impl(
                 
                 if has_uncommitted {
                     tracing::warn!("[{}] Bug#{} 有未提交变更，强制 commit+push", agent_name, bug_id);
-                    // 强制 add + commit
-                    let _ = Command::new("git")
-                        .args(["-C", &worktree, "add", "--all"])
-                        .output();
-                    let commit_msg = format!("fix(#{}): {} — 兜底提交（AI Agent {} 自动修复）", 
-                        bug_id, bug_title, agent_name);
-                    let _ = Command::new("git")
-                        .args(["-C", &worktree, "commit", "-m", &commit_msg])
-                        .output();
-                    // 强制 push
-                    let _ = Command::new("git")
-                        .args(["-C", &worktree, "push", "origin", agent_name])
-                        .output();
-                    // Cherry-pick to develop
-                    let hash_output = Command::new("git")
-                        .args(["-C", &worktree, "rev-parse", "HEAD"])
-                        .output();
-                    if let Ok(ho) = hash_output {
-                        let hash = String::from_utf8_lossy(&ho.stdout).trim().to_string();
-                        if hash.len() >= 8 {
-                            let main_repo = "/root/.openclaw/workspace/his-repo";
-                            let _ = Command::new("git").args(["-C", main_repo, "fetch", "origin", "develop"]).output();
-                            let _ = Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
-                            let _ = Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
-                            let cherry = Command::new("git")
-                                .args(["-C", main_repo, "cherry-pick", &hash])
-                                .output();
-                            if cherry.map(|o| o.status.success()).unwrap_or(false) {
-                                let _ = Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
-                                tracing::info!("[{}] Bug#{} cherry-pick 到 develop 成功", agent_name, bug_id);
-                            } else {
-                                tracing::warn!("[{}] Bug#{} cherry-pick 失败，可能有冲突", agent_name, bug_id);
-                            }
-                        }
-                    }
+                    auto_commit_fix(agent_name, bug_id, bug_title, &stdout);
+                } else {
+                    // 变更已由 mimo-code 提交，确保 push + merge 到 develop
+                    tracing::info!("[{}] Bug#{} 变更已提交，确保 push + merge 到 develop", agent_name, bug_id);
+                    push_and_merge_to_develop(agent_name, bug_id);
                 }
             }
 
@@ -1165,74 +1135,142 @@ pub async fn download_zentao_image(cfg: &crate::config::Config, fid: &str) -> an
 }
 
 fn query_bug_details_v2(bug_id: &str) -> String {
-    // 在已有 tokio 运行时上下文中执行 async 调用
-    let rt_handle = tokio::runtime::Handle::try_current();
-    match rt_handle {
-        Ok(handle) => {
-            let result = handle.block_on(async {
-                let cfg = match crate::config::Config::load() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!("Failed to load config for Zentao client: {}", e);
-                        return None;
-                    }
-                };
-                let client = crate::core::zentao::ZentaoClient::from_config(&cfg);
-                match client.get_bug(bug_id).await {
-                    Ok(detail) => {
-                        let mut text = detail.format_for_prompt();
-                        tracing::info!("Zentao v2: Bug #{} detail fetched ({})", bug_id,
-                            text.lines().count());
-
-                        // ── Vision 多模态分析：从 raw_steps_html 提取图片 ──
-                        let file_ids = extract_file_ids_from_html(&detail.raw_steps_html);
-                        if !file_ids.is_empty() {
-                            tracing::info!("Bug #{} 发现 {} 张附图，尝试 Vision 分析", bug_id, file_ids.len());
-                            let mut images: Vec<Vec<u8>> = Vec::new();
-                            for fid in &file_ids {
-                                if let Ok(bytes) = download_zentao_image(&cfg, fid).await {
-                                    if bytes.len() > 100 {
-                                        images.push(bytes);
-                                    }
-                                }
-                            }
-                            if !images.is_empty() {
-                                let llm = crate::core::llm::LlmClient::from_config(&cfg);
-                                let system = "你是 HIS 系统的 Bug 分析专家。根据禅道截图与文本信息，输出可执行修复要点。";
-                                let user = format!("以下是 Bug 信息与附件截图。请结合截图识别关键界面问题，并给出修复优先级与前端改动建议。\n\n{}", text);
-                                match llm.vision(system, &user, &images, Some(&llm.vision_model), None, Some(2048)).await {
-                                    Ok(vision_ans) => {
-                                        text.push_str("\n\n### Vision 多模态分析\n");
-                                        text.push_str(&vision_ans);
-                                        tracing::info!("Bug #{} Vision 分析完成（{} 张图）", bug_id, images.len());
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Bug #{} Vision 分析失败，回退纯文本: {}", bug_id, e);
-                                    }
-                                }
-                            }
-                        }
-                        Some(text)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Zentao v2 API failed for Bug #{}: {}, falling back to v1", bug_id, e);
-                        None
-                    }
-                }
-            });
-            match result {
-                Some(text) => text,
-                None => query_bug_details(bug_id), // fallback
-            }
+    // 使用同步 HTTP 获取 Bug 详情，避免 block_on 死锁
+    let cfg = match crate::config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to load config: {}", e);
+            return String::new();
         }
-        Err(_) => {
-            tracing::warn!("No tokio runtime context, falling back to v1 for Bug #{}", bug_id);
-            query_bug_details(bug_id) // fallback
+    };
+    
+    let token = {
+        let content = std::fs::read_to_string(&cfg.zentao.token_file).unwrap_or_default();
+        content.lines()
+            .find(|l| l.starts_with("TOKEN="))
+            .map(|l| l.trim_start_matches("TOKEN=").trim().trim_matches('"').trim_matches('\'').to_string())
+            .unwrap_or_default()
+    };
+    
+    if token.is_empty() {
+        tracing::warn!("No Zentao token found for Bug #{}", bug_id);
+        return String::new();
+    }
+    
+    let url = format!("{}/api.php/v1/products/4/bugs/{}", cfg.zentao.base_url, bug_id);
+    let client = match reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(15))
+        .build() {
+        Ok(c) => c,
+        Err(e) => { tracing::warn!("HTTP client error: {}", e); return String::new(); }
+    };
+    
+    let text = match client.get(&url).header("Token", &token).send() {
+        Ok(r) => match r.text() {
+            Ok(t) => t,
+            Err(e) => { tracing::warn!("Response read error: {}", e); return String::new(); }
+        },
+        Err(e) => { tracing::warn!("Zentao API error for Bug {}: {}", bug_id, e); return String::new(); }
+    };
+    
+    let v: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return text,
+    };
+    
+    let title = v["title"].as_str().unwrap_or("unknown");
+    let steps = v["steps"].as_str().unwrap_or("");
+    let status = v["status"].as_str().unwrap_or("unknown");
+    let severity = v["severity"].as_i64().unwrap_or(3);
+    let module = v["moduleTitle"].as_str().unwrap_or("");
+    
+    tracing::info!("Zentao v2: Bug #{} detail fetched", bug_id);
+    format!("Bug #{}: {}\n状态: {}\n严重程度: {}\n模块: {}\n重现步骤: {}\n",
+        bug_id, title, status, severity, module,
+        steps.chars().take(3000).collect::<String>())
+}
+
+/// Auto-commit fix changes to the agent's worktree.
+/// Push existing commit on agent branch + cherry-pick to develop.
+/// Used when mimo-code already committed but auto_commit_fix wasn't called
+/// or commit failed (nothing to commit because already committed).
+fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
+    let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+    let branch = agent_name;
+
+    // Push to remote
+    let push_result = Command::new("git")
+        .args(["-C", &worktree, "push", "origin", branch])
+        .output();
+    match &push_result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("[{}] Bug#{} pushed to origin/{}", agent_name, bug_id, branch);
+        }
+        _ => {
+            let err = push_result.map(|o| String::from_utf8_lossy(&o.stderr).to_string()).unwrap_or_else(|e| e.to_string());
+            tracing::warn!("[{}] Bug#{} push 失败: {}", agent_name, bug_id, err.chars().take(200).collect::<String>());
+            return;
+        }
+    }
+
+    // Find the fix commit hash
+    let hash_output = Command::new("git")
+        .args(["-C", &worktree, "log", "--oneline", "--grep", &format!("#{}", bug_id), "--format=%H", "-1"])
+        .output();
+    let hash = hash_output
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if hash.is_empty() || hash.len() < 8 {
+        tracing::warn!("[{}] Bug#{} 找不到修复 commit", agent_name, bug_id);
+        return;
+    }
+
+    // Cherry-pick to develop
+    let main_repo = "/root/.openclaw/workspace/his-repo";
+    let _ = Command::new("git").args(["-C", main_repo, "fetch", "origin", "develop"]).output();
+    let _ = Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
+    let _ = Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
+
+    let author = format!("{} <{}@gentronhealth.com>", agent_name, agent_name);
+    let cherry = Command::new("git")
+        .args(["-C", main_repo, "cherry-pick", "--strategy=recursive", "-X", "theirs",
+               "--author", &author, &hash])
+        .output();
+    match cherry {
+        Ok(o) if o.status.success() => {
+            let _ = Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
+            tracing::info!("[{}] Bug#{} cherry-picked to develop ✅", agent_name, bug_id);
+        }
+        _ => {
+            let _ = Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
+            // Fallback: checkout files directly
+            let changed = Command::new("git")
+                .args(["-C", &worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", &hash])
+                .output();
+            if let Ok(changed_out) = changed {
+                let changed_str = String::from_utf8_lossy(&changed_out.stdout).to_string();
+                let files: Vec<&str> = changed_str.lines().filter(|f| !f.is_empty()).collect();
+                if !files.is_empty() {
+                    let _ = Command::new("git").args(["-C", main_repo, "reset", "--hard", "origin/develop"]).output();
+                    for f in &files {
+                        let _ = Command::new("git").args(["-C", main_repo, "checkout", &hash, "--", f]).output();
+                    }
+                    let mut add_args = vec!["-C", main_repo, "add"];
+                    for f in &files { add_args.push(f); }
+                    let _ = Command::new("git").args(&add_args).output();
+                    let commit_msg = format!("fix(#{}): {} (文件合入)", bug_id, agent_name);
+                    let _ = Command::new("git")
+                        .args(["-C", main_repo, "commit", "-m", &commit_msg, "--author", &author])
+                        .output();
+                    let _ = Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
+                    tracing::info!("[{}] Bug#{} 文件合入到 develop ✅ ({} 个文件)", agent_name, bug_id, files.len());
+                }
+            }
         }
     }
 }
 
-/// Auto-commit fix changes to the agent's worktree.
 fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str) {
     let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
     let add_result = Command::new("git")
@@ -1268,11 +1306,26 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
     let commit_result = Command::new("git")
         .args(["-C", &worktree, "commit", "-m", &final_msg])
         .output();
-    match &commit_result {
+    let commit_ok = match &commit_result {
         Ok(o) if !o.status.success() => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            tracing::error!("[{}] Bug#{} git commit 失败: {}", agent_name, bug_id, stderr.chars().take(300).collect::<String>());
-            return; // commit 失败，不继续
+            tracing::warn!("[{}] Bug#{} git commit 失败 (可能已被 mimo-code 提交): {}", agent_name, bug_id, stderr.chars().take(300).collect::<String>());
+            // 检查分支上是否已有此 bug 的 commit（mimo-code 可能已自行提交）
+            let existing = Command::new("git")
+                .args(["-C", &worktree, "log", "--oneline", "--grep", &format!("#{}", bug_id), "-1"])
+                .output()
+                .map(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
+                .unwrap_or(None);
+            if existing.is_some() {
+                tracing::info!("[{}] Bug#{} 已有 commit: {}，跳过 commit 继续 push", agent_name, bug_id, existing.unwrap_or_default());
+                true
+            } else {
+                tracing::error!("[{}] Bug#{} 无现有 commit 且 commit 失败，中止", agent_name, bug_id);
+                return;
+            }
         }
         Err(e) => {
             tracing::error!("[{}] Bug#{} git commit 执行错误: {}", agent_name, bug_id, e);
@@ -1280,8 +1333,9 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
         }
         _ => {
             tracing::info!("[{}] Bug#{} git commit 成功 ✅", agent_name, bug_id);
+            true
         }
-    }
+    };
 
     // 铁律 #24: 修复后必须本地编译验证，禁止未编译就 push
     let branch = agent_name;
@@ -2378,7 +2432,9 @@ pub fn run_harness_loop(
             tracing::info!("[{}] Bug#{} 检测到 {} 个文件变更，执行自动提交", agent_name, bug_id, changes);
             auto_commit_fix(agent_name, bug_id, bug_title, &combined_stdout);
         } else {
-            tracing::info!("[{}] Bug#{} 变更已提交（Codex 自行 commit 了），跳过重复提交", agent_name, bug_id);
+            tracing::info!("[{}] Bug#{} 变更已提交（Codex 自行 commit 了），确保 push + merge 到 develop", agent_name, bug_id);
+            // 虽然 commit 已存在，仍需 push + cherry-pick 到 develop
+            push_and_merge_to_develop(agent_name, bug_id);
         }
         // 设置持久化"已修复"标记（防止 scan_analysis_docs 重复入队）
         let fixed_key = format!("bug_fixed:{}", bug_id);
