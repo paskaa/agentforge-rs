@@ -30,6 +30,8 @@ const AGENT_NAMES: &[(&str, &str)] = &[
     ("xunyu","荀彧"),("zhangfei","张飞"),("huatuo","华佗"),("chenlin","陈琳"),
 ];
 const FIXERS: &[&str] = &["zhugeliang","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
+/// 真正执行代码修复的 Agent（排除测试/验收/归档人员）
+const CODE_FIXERS: &[&str] = &["guanyu", "zhaoyun", "xunyu"];
 const ALL_AGENTS: &[&str] = &["zhugeliang","liubei","guanyu","zhaoyun","xunyu","zhangfei","huatuo","chenlin"];
 const COORDINATOR: &str = "liubei";
 
@@ -145,7 +147,8 @@ impl AgentExecutor {
             }
 
             // 修复人员定期扫描诸葛亮分析文档（每 60 秒）
-            if self.is_fixer && self.last_analysis_scan.elapsed() > Duration::from_secs(60) {
+            let can_fix = CODE_FIXERS.contains(&self.agent_id.as_str());
+            if can_fix && self.last_analysis_scan.elapsed() > Duration::from_secs(60) {
                 self.last_analysis_scan = Instant::now();
                 self.scan_analysis_docs().await;
             }
@@ -299,6 +302,26 @@ impl AgentExecutor {
             let lock_key = format!("fix_active:{}:{}", self.agent_id, bid);
             if self.redis.clone().exists::<_, bool>(&lock_key).await.unwrap_or(false) { continue; }
 
+            // 路由校验：后端bug不应分给前端，前端bug不应分给后端
+            let title_lower = content.to_lowercase();
+            let is_backend_bug = title_lower.contains("java") || title_lower.contains("service")
+                || title_lower.contains("mapper") || title_lower.contains("sql")
+                || title_lower.contains("接口") || title_lower.contains("后端")
+                || title_lower.contains("数据库") || title_lower.contains("api");
+            let is_frontend_bug = title_lower.contains("前端") || title_lower.contains("vue")
+                || title_lower.contains("界面") || title_lower.contains("显示")
+                || title_lower.contains("弹窗") || title_lower.contains("页面")
+                || title_lower.contains("组件") || title_lower.contains("css");
+            let agent_is_backend = self.agent_id == "guanyu";
+            let agent_is_frontend = self.agent_id == "zhaoyun";
+
+            if (is_backend_bug && agent_is_frontend) || (is_frontend_bug && agent_is_backend) {
+                tracing::warn!("[{}] Bug #{} 类型不匹配（{}: {}），跳过", self.agent_id, bid,
+                    if agent_is_frontend { "前端" } else { "后端" },
+                    if is_backend_bug { "后端" } else { "前端" });
+                continue;
+            }
+
             // 入队
             let task = serde_json::json!({
                 "agent_id": self.agent_id,
@@ -438,6 +461,14 @@ impl AgentExecutor {
             }
         }
 
+        // ── 去重: 5分钟内跳过的bug不再重复处理 ──
+        let skip_key = format!("skip_no_analysis:{}:{}", self.agent_id, bug_id);
+        let is_skipped: bool = self.redis.clone().exists(&skip_key).await.unwrap_or(false);
+        if is_skipped {
+            tracing::debug!("[{}] Bug#{} 5分钟内已跳过，不再处理", self.agent_id, bug_id);
+            return;
+        }
+
         // ── 铁律: 修复前必须有诸葛亮分析文档 ──
         let fixers = ["guanyu", "zhaoyun", "xunyu"];
         if fixers.contains(&self.agent_id.as_str()) {
@@ -451,6 +482,9 @@ impl AgentExecutor {
             if !has_analysis {
                 // 没有分析文档 → 跳过，等诸葛亮分析完成后再由扫描器入队
                 tracing::info!("[{}] Bug#{} 无分析文档，跳过（等诸葛亮分析）", self.agent_id, bug_id);
+                // 设置5分钟TTL防止重复处理（避免死循环）
+                let skip_key = format!("skip_no_analysis:{}:{}", self.agent_id, bug_id);
+                let _: redis::RedisResult<()> = self.redis.clone().set_ex(&skip_key, "1", 300).await;
                 return;
             }
         }

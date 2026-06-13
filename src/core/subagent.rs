@@ -159,7 +159,7 @@ fn load_skill(path: &str) -> String {
     } else {
         tracing::warn!("[skill] Empty: {}", path);
     }
-    content.chars().take(3000).collect()
+    content.chars().take(2000).collect()
 }
 
 /// Build the full harness-augmented prompt for Codex.
@@ -169,7 +169,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 
     let agents_md_path = "/root/.openclaw/workspace/his-repo/AGENTS.md";
     let agents_md_hint = load_skill(agents_md_path)
-        .lines().take(30).collect::<Vec<_>>().join("\n");
+        .lines().take(15).collect::<Vec<_>>().join("\n");
     
     // 加载统一铁律文件
     let iron_laws = load_skill("/root/.codex/rules/IRON_LAWS.md");
@@ -190,16 +190,41 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     let analysis_section = if analysis_doc.is_empty() {
         "（未找到诸葛亮分析文档，请自行分析根因后修复）".to_string()
     } else {
-        format!(r#"## ⚠️ 诸葛亮分析报告（必须先读，验证后再修复）
-
-**铁律：你必须先阅读以下分析报告，判断分析是否正确。**
-- 如果分析正确 → 按方案执行修复
-- 如果分析有误 → 修正分析后修复，并在输出中说明修正点
-- 如果分析不完整 → 补充分析后修复
+        // 精简分析报告：只取关键章节，避免prompt过大
+        let mut key_sections = Vec::new();
+        let mut in_section = false;
+        let mut section_buf = String::new();
+        let target_sections = ["根因分析", "修复方案", "修复 Agent", "FIXER_ID"];
+        for line in analysis_doc.lines() {
+            let trimmed = line.trim();
+            let is_header = trimmed.starts_with("##") || trimmed.starts_with("**FIXER_ID");
+            if is_header {
+                if in_section && !section_buf.is_empty() {
+                    key_sections.push(section_buf.clone());
+                    section_buf.clear();
+                }
+                in_section = target_sections.iter().any(|s| trimmed.contains(s));
+                if in_section { section_buf.push_str(line); section_buf.push('\n'); }
+            } else if in_section {
+                section_buf.push_str(line);
+                section_buf.push('\n');
+            }
+        }
+        if in_section && !section_buf.is_empty() { key_sections.push(section_buf); }
+        let extracted = if key_sections.is_empty() {
+            // fallback: 取前1500字符
+            analysis_doc.chars().take(1500).collect::<String>()
+        } else {
+            key_sections.join("\n")
+        };
+        format!(r#"## ⚠️ 诸葛亮分析报告（验证后再修复）
+- 分析正确 → 按方案修复
+- 分析有误 → 修正后修复
+- 分析不完整 → 补充后修复
 
 ```markdown
 {}
-```"#, analysis_doc)
+```"#, extracted.chars().take(2000).collect::<String>())
     };
 
     // Find agent role info
