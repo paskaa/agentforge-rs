@@ -1604,7 +1604,7 @@ impl AgentExecutor {
             crate::core::codex_exec::CodexExecResult {
                 success: false, final_message: String::new(), stderr: format!("spawn error: {}", e),
                 verdict: crate::core::codex_exec::Verdict::Fail("spawn error".into()),
-                events: vec![], total_tokens: 0, elapsed_ms: 0,
+                total_tokens: 0, elapsed_ms: 0,
             }
         });
 

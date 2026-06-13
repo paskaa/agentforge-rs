@@ -38,6 +38,7 @@ pub struct LlmConfig {
     pub coding_model: String,
     #[serde(default = "default_vision_model")]
     pub vision_model: String,
+
 }
 
 #[derive(Debug, Deserialize, Clone)]
