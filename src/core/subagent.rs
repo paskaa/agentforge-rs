@@ -2386,7 +2386,7 @@ pub fn run_harness_loop(
     
     tracing::info!("[{}] Bug#{} Harness Loop 完成: fix={} review={} test={} verify={} elapsed={}ms changes={}",
         agent_name, bug_id,
-        if fix_result.verdict.is_pass() { "PASS" } else { "FAIL" },
+        if fix_effective_pass { "PASS" } else { "FAIL" },
         phase_verdicts.iter().find(|(p,_)| p=="reviewer").map(|(_,v)| v.as_str()).unwrap_or("?"),
         if test_passed { "PASS" } else { "FAIL" },
         if verify_passed { "PASS" } else { "FAIL" },
@@ -2411,7 +2411,7 @@ pub fn run_harness_loop(
         combined_stderr.push_str(&verify_result.stderr);
     }
     
-    let last_phase = if !fix_result.verdict.is_pass() { "generator" }
+    let last_phase = if !fix_effective_pass { "generator" }
         else if !test_passed { "qa" }
         else if !verify_passed { "verifier" }
         else { "verifier" };

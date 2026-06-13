@@ -1610,8 +1610,40 @@ impl AgentExecutor {
 
         // 无论 success 与否，只要有输出就使用（LLM 分析有价值，VERDICT 不影响分析质量）
         let llm_output = if !analysis_result.final_message.is_empty() {
-            tracing::info!("[zhugeliang] Bug #{} LLM 分析完成 ({}ms, {} tokens)", bid_clone, analysis_result.elapsed_ms, analysis_result.total_tokens);
-            analysis_result.final_message.clone()
+            let msg = analysis_result.final_message.clone();
+            // 检测连接错误 — 如果输出主要是连接错误日志，视为无效分析
+            let is_connection_error = msg.contains("Reconnecting...")
+                || msg.contains("stream disconnected before completion")
+                || msg.contains("error sending request for url")
+                || (msg.contains("thread.started") && msg.contains("turn.failed"));
+            let error_lines = msg.lines().filter(|l| l.contains("error") || l.contains("Reconnecting") || l.contains("thread.")).count();
+            let total_lines = msg.lines().filter(|l| !l.trim().is_empty()).count();
+            let error_ratio = if total_lines > 0 { error_lines as f64 / total_lines as f64 } else { 1.0 };
+
+            if is_connection_error && error_ratio > 0.3 {
+                tracing::warn!("[zhugeliang] Bug #{} LLM 分析输出包含大量连接错误 ({:.0}%)，重试分析", bid_clone, error_ratio * 100.0);
+                // 重试一次（analysis_prompt 已被 move，用简化 prompt）
+                let retry_prompt = format!(
+                    "你是诸葛亮，HealthLink-HIS 系统的架构师。分析 Bug #{} 的根因和修复方案。\n\nBug: {}\n模块: {}\n\n请给出根因分析、修复方案和路由决策（FIXER: guanyu/zhaoyun/xunyu）。",
+                    bid_clone, bug_title, bug_module
+                );
+                let retry_result = crate::core::codex_exec::codex_exec(
+                    &retry_prompt, "read-only", None, Some("zhugeliang"), 120,
+                );
+                let retry_msg = retry_result.final_message.clone();
+                let retry_is_error = retry_msg.contains("Reconnecting...")
+                    || retry_msg.contains("stream disconnected before completion");
+                if !retry_msg.is_empty() && !retry_is_error {
+                    tracing::info!("[zhugeliang] Bug #{} 重试分析成功 ({}ms)", bid_clone, retry_result.elapsed_ms);
+                    retry_msg
+                } else {
+                    tracing::warn!("[zhugeliang] Bug #{} 重试仍失败，降级关键词分析", bid_clone);
+                    msg
+                }
+            } else {
+                tracing::info!("[zhugeliang] Bug #{} LLM 分析完成 ({}ms, {} tokens)", bid_clone, analysis_result.elapsed_ms, analysis_result.total_tokens);
+                msg
+            }
         } else {
             tracing::warn!("[zhugeliang] Bug #{} LLM 分析无输出，降级关键词分析 (stderr: {})", bid_clone, analysis_result.stderr.chars().take(200).collect::<String>());
             String::new()
@@ -1718,7 +1750,18 @@ impl AgentExecutor {
             } else { true }
         } else { true };
         if should_write {
-            let _ = std::fs::write(&archive_path, &archive_content);
+            // 过滤掉 mimo-code 连接错误日志，只保留实际分析内容
+            let cleaned_content: String = archive_content.lines()
+                .filter(|l| !l.contains("Reconnecting..."))
+                .filter(|l| !l.contains("stream disconnected before completion"))
+                .filter(|l| !l.contains("error sending request for url"))
+                .filter(|l| !l.contains("\"type\":\"thread.started\""))
+                .filter(|l| !l.contains("\"type\":\"turn.started\""))
+                .filter(|l| !l.contains("\"type\":\"turn.failed\""))
+                .filter(|l| !l.contains("\"type\":\"error\",\"message\""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = std::fs::write(&archive_path, &cleaned_content);
             tracing::info!("[zhugeliang] 📄 存档: {}", archive_path.display());
         }
 
