@@ -297,7 +297,25 @@ impl AgentExecutor {
             let existing: Vec<String> = self.redis.clone().lrange(&my_queue, 0, -1).await.unwrap_or_default();
             if existing.iter().any(|s| s.contains(&format!("Bug #{}", bid))) { continue; }
 
-            // 检查是否已修复（git log 检查）
+            // 检查是否已修复（Redis 持久标记 — 30天TTL，由 Phase 1 commit 时设置）
+            let fixed_key = format!("bug_fixed:{}", bid);
+            if self.redis.clone().exists::<_, bool>(&fixed_key).await.unwrap_or(false) {
+                tracing::debug!("[{}] Bug #{} 已有 bug_fixed 标记，跳过", self.agent_id, bid);
+                continue;
+            }
+            // 降级检查：develop 分支 git log 是否有此 bug 的 commit
+            let has_develop_commit = std::process::Command::new("git")
+                .args(["-C", "/root/.openclaw/workspace/his-repo", "log", "origin/develop",
+                       "--grep", &format!("Bug #{}", bid), "--oneline", "-1"])
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if has_develop_commit {
+                tracing::info!("[{}] Bug #{} 在 develop 上已有 commit，设置 fixed 标记并跳过", self.agent_id, bid);
+                let _: redis::RedisResult<()> = self.redis.clone().set_ex(&fixed_key, "fixed", 2592000).await;
+                continue;
+            }
+
             // 检查是否已在处理中
             let lock_key = format!("fix_active:{}:{}", self.agent_id, bid);
             if self.redis.clone().exists::<_, bool>(&lock_key).await.unwrap_or(false) { continue; }

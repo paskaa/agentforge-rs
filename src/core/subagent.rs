@@ -2174,16 +2174,33 @@ pub fn run_harness_loop(
         compile_passed = true;
     }
     
+    // ═══ 铁律: Phase 1 完成后立即 commit — 不等 4 阶段全部完成 ═══
+    // 防止后续阶段超时/卡死导致修复代码丢失
+    {
+        let early_changes = count_changed_files(agent_name, bug_id);
+        if early_changes > 0 {
+            tracing::info!("[{}] Bug#{} Phase 1 完成，立即 commit（{} 个文件变更）", agent_name, bug_id, early_changes);
+            auto_commit_fix(agent_name, bug_id, bug_title, &fix_result.final_message);
+            // 设置持久化"已修复"标记（redis-cli 同步调用，30天TTL）
+            let fixed_key = format!("bug_fixed:{}", bug_id);
+            let _ = Command::new("redis-cli")
+                .args(["SET", &fixed_key, "fixed", "EX", "2592000"])
+                .output();
+        }
+    }
+    
     // ═══ Phase 2: Reviewer 审查（最多2轮） ═══
     tracing::info!("[{}] Bug#{} Harness Loop Phase 2: Reviewer 审查", agent_name, bug_id);
     let mut review_verdict = Verdict::Unknown;
     let max_review_rounds = 2;
     let mut review_output = String::new();
     
+    // 铁律: Review 阶段超时上限 300s（5分钟），防止模型无响应时卡死 20 分钟
+    let review_timeout = if timeout_secs == 0 { 300 } else { std::cmp::min(timeout_secs * 2 / 3, 300) };
     for round in 1..=max_review_rounds {
         let review_prompt = build_review_prompt(agent_name, bug_id, bug_title, &fix_result.final_message);
         let rev_result = codex_exec::codex_exec(
-            &review_prompt, "read-only", None, Some(agent_name), timeout_secs * 2 / 3,
+            &review_prompt, "read-only", None, Some(agent_name), review_timeout,
         );
         review_output = rev_result.final_message.clone();
         review_verdict = rev_result.verdict;
@@ -2236,7 +2253,7 @@ pub fn run_harness_loop(
     tracing::info!("[{}] Bug#{} Harness Loop Phase 3: QA 测试", agent_name, bug_id);
     let test_prompt = build_test_prompt(agent_name, bug_id, bug_title);
     let test_result = codex_exec::codex_exec(
-        &test_prompt, sandbox, None, Some(agent_name), timeout_secs * 2 / 3,
+        &test_prompt, sandbox, None, Some(agent_name), std::cmp::min(if timeout_secs == 0 { 600 } else { timeout_secs * 2 / 3 }, 600),
     );
     
     let test_verdict = match &test_result.verdict {
@@ -2363,6 +2380,11 @@ pub fn run_harness_loop(
         } else {
             tracing::info!("[{}] Bug#{} 变更已提交（Codex 自行 commit 了），跳过重复提交", agent_name, bug_id);
         }
+        // 设置持久化"已修复"标记（防止 scan_analysis_docs 重复入队）
+        let fixed_key = format!("bug_fixed:{}", bug_id);
+        let _ = Command::new("redis-cli")
+            .args(["SET", &fixed_key, "fixed", "EX", "2592000"])
+            .output();
 
         // ═══ 铁律: 修复后必须写禅道备注 ═══
         // 检查 develop 上是否有 commit（cherry-pick 是否成功）
