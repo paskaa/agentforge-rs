@@ -847,6 +847,27 @@ fn run_codex_fix_impl(
             tracing::warn!("[{}] git pull error: {}", agent_name, e);
         }
     }
+    // 同步 develop 最新代码（fix commit 在 develop 上，worktree 需要合并）
+    let _ = Command::new("git").args(["-C", &worktree, "fetch", "origin", "develop"]).output();
+    let merge_result = Command::new("git")
+        .args(["-C", &worktree, "merge", "origin/develop", "--no-edit", "-X", "theirs"])
+        .output();
+    match merge_result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("[{}] Merged origin/develop into worktree", agent_name);
+        }
+        Ok(o) => {
+            let stderr_str = String::from_utf8_lossy(&o.stderr).to_string();
+            tracing::warn!("[{}] merge develop issue: {}", agent_name, stderr_str.chars().take(200).collect::<String>());
+            // merge 冲突时用 reset 保底
+            let _ = Command::new("git").args(["-C", &worktree, "merge", "--abort"]).output();
+            let _ = Command::new("git").args(["-C", &worktree, "reset", "--hard", "origin/develop"]).output();
+            tracing::info!("[{}] Worktree reset to origin/develop (merge conflict fallback)", agent_name);
+        }
+        Err(e) => {
+            tracing::warn!("[{}] merge develop error: {}", agent_name, e);
+        }
+    }
 
     // Step 4: Launch codex via mimo2codex pipeline
     // Uses codex-aliyun which: (1) starts mimo2codex if needed, (2) runs codex with mimo model
