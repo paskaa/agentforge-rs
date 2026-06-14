@@ -1212,6 +1212,39 @@ fn query_bug_details_v2(bug_id: &str) -> String {
         steps.chars().take(3000).collect::<String>())
 }
 
+/// Push with retry (3 attempts, 2s sleep between).
+/// Returns true if push succeeded.
+fn push_with_retry(repo: &str, refspec: &str, max_attempts: u32) -> bool {
+    for attempt in 1..=max_attempts {
+        let ok = Command::new("git")
+            .args(["-C", repo, "push", "--force", refspec])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok { return true; }
+        if attempt < max_attempts {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    false
+}
+
+/// Push with retry (no --force) to origin.
+fn push_origin_retry(repo: &str, refspec: &str, max_attempts: u32) -> bool {
+    for attempt in 1..=max_attempts {
+        let ok = Command::new("git")
+            .args(["-C", repo, "push", "origin", refspec])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok { return true; }
+        if attempt < max_attempts {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    false
+}
+
 /// Auto-commit fix changes to the agent's worktree.
 /// Push existing commit on agent branch + cherry-pick to develop.
 /// Used when mimo-code already committed but auto_commit_fix wasn't called
@@ -1260,34 +1293,42 @@ fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
         .output();
     match cherry {
         Ok(o) if o.status.success() => {
-            let _ = Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
-            tracing::info!("[{}] Bug#{} cherry-picked to develop ✅", agent_name, bug_id);
+            let pushed = push_origin_retry(main_repo, "develop", 3);
+            tracing::info!("[{}] Bug#{} cherry-picked to develop {} ✅", agent_name, bug_id, if pushed { "pushed" } else { "local only" });
         }
-        _ => {
-            let _ = Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
-            // Fallback: checkout files directly
-            let changed = Command::new("git")
-                .args(["-C", &worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", &hash])
-                .output();
-            if let Ok(changed_out) = changed {
-                let changed_str = String::from_utf8_lossy(&changed_out.stdout).to_string();
-                let files: Vec<&str> = changed_str.lines().filter(|f| !f.is_empty()).collect();
-                if !files.is_empty() {
-                    let _ = Command::new("git").args(["-C", main_repo, "reset", "--hard", "origin/develop"]).output();
-                    for f in &files {
-                        let _ = Command::new("git").args(["-C", main_repo, "checkout", &hash, "--", f]).output();
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            if stderr.contains("empty commit") || stderr.contains("No changes") {
+                tracing::info!("[{}] Bug#{} cherry-pick: changes already on develop (empty commit) ✅", agent_name, bug_id);
+            } else {
+                let _ = Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
+                // Fallback: checkout files directly
+                let changed = Command::new("git")
+                    .args(["-C", &worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", &hash])
+                    .output();
+                if let Ok(changed_out) = changed {
+                    let changed_str = String::from_utf8_lossy(&changed_out.stdout).to_string();
+                    let files: Vec<&str> = changed_str.lines().filter(|f| !f.is_empty()).collect();
+                    if !files.is_empty() {
+                        let _ = Command::new("git").args(["-C", main_repo, "reset", "--hard", "origin/develop"]).output();
+                        for f in &files {
+                            let _ = Command::new("git").args(["-C", main_repo, "checkout", &hash, "--", f]).output();
+                        }
+                        let mut add_args = vec!["-C", main_repo, "add"];
+                        for f in &files { add_args.push(f); }
+                        let _ = Command::new("git").args(&add_args).output();
+                        let commit_msg = format!("fix(#{}): {} (文件合入)", bug_id, agent_name);
+                        let _ = Command::new("git")
+                            .args(["-C", main_repo, "commit", "-m", &commit_msg, "--author", &author])
+                            .output();
+                        let pushed = push_origin_retry(main_repo, "develop", 3);
+                        tracing::info!("[{}] Bug#{} 文件合入到 develop {} ({} 个文件)", agent_name, bug_id, if pushed { "pushed ✅" } else { "local only ⚠️" }, files.len());
                     }
-                    let mut add_args = vec!["-C", main_repo, "add"];
-                    for f in &files { add_args.push(f); }
-                    let _ = Command::new("git").args(&add_args).output();
-                    let commit_msg = format!("fix(#{}): {} (文件合入)", bug_id, agent_name);
-                    let _ = Command::new("git")
-                        .args(["-C", main_repo, "commit", "-m", &commit_msg, "--author", &author])
-                        .output();
-                    let _ = Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
-                    tracing::info!("[{}] Bug#{} 文件合入到 develop ✅ ({} 个文件)", agent_name, bug_id, files.len());
                 }
             }
+        }
+        Err(e) => {
+            tracing::warn!("[{}] Bug#{} cherry-pick error: {}", agent_name, bug_id, e);
         }
     }
 }
@@ -1449,10 +1490,12 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                                     .output();
                                 match cherry2 {
                                     Ok(o2) if o2.status.success() => {
-                                        let _ = Command::new("git")
-                                            .args(["-C", main_repo, "push", "origin", "develop"])
-                                            .output();
-                                        tracing::info!("[{}] Cherry-picked (retry) fix to develop for Bug #{}", agent_name, bug_id);
+                                        let pushed2 = push_origin_retry(main_repo, "develop", 3);
+                                        if pushed2 {
+                                            tracing::info!("[{}] Cherry-picked (retry) fix to develop for Bug #{}", agent_name, bug_id);
+                                        } else {
+                                            tracing::warn!("[{}] Cherry-pick (retry) OK but push failed for Bug #{}", agent_name, bug_id);
+                                        }
                                     }
                                     Ok(o2) => {
                                         let _ = Command::new("git")
@@ -2400,12 +2443,14 @@ pub fn run_harness_loop(
                 .args(["-C", main_repo, "cherry-pick", "--strategy=recursive", "-X", "theirs",
                        "--author", &author, &fix_hash])
                 .output();
-            if cherry.map(|o| o.status.success()).unwrap_or(false) {
+            let cherry_ok = cherry.as_ref().map(|o| o.status.success()).unwrap_or(false);
+            let cherry_stderr = cherry.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).to_string()).unwrap_or_default();
+            if cherry_ok || cherry_stderr.contains("empty commit") || cherry_stderr.contains("No changes") {
+                // cherry-pick 成功 或 变更已在 develop 上（empty commit = 已合入）
                 let _ = std::process::Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
-                tracing::info!("[{}] Bug#{} 降级验收: cherry-pick 到 develop 成功", agent_name, bug_id);
+                tracing::info!("[{}] Bug#{} 降级验收: cherry-pick 到 develop 成功 (empty={})", agent_name, bug_id, !cherry_ok);
             } else {
                 let _ = std::process::Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
-                // 文件合入降级
                 let changed = std::process::Command::new("git")
                     .args(["-C", &worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", &fix_hash])
                     .output();
@@ -2424,21 +2469,59 @@ pub fn run_harness_loop(
                         let _ = std::process::Command::new("git")
                             .args(["-C", main_repo, "commit", "-m", &commit_msg, "--author", &author])
                             .output();
-                        let _ = std::process::Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
-                        tracing::info!("[{}] Bug#{} 降级验收: 文件合入到 develop 成功 ({} 个文件)", agent_name, bug_id, files.len());
+                        // push 重试 3 次（网络抖动常见）
+                        for push_attempt in 1..=3 {
+                            let push_ok = std::process::Command::new("git")
+                                .args(["-C", main_repo, "push", "origin", "develop"])
+                                .output()
+                                .map(|o| o.status.success())
+                                .unwrap_or(false);
+                            if push_ok {
+                                tracing::info!("[{}] Bug#{} 降级验收: 文件合入到 develop 成功 ({} 个文件, push attempt {})", agent_name, bug_id, files.len(), push_attempt);
+                                break;
+                            }
+                            if push_attempt < 3 {
+                                std::thread::sleep(std::time::Duration::from_secs(2));
+                            }
+                        }
                     }
                 }
             }
         }
-        // 检查 develop 上是否有 fix commit（支持多种格式）
+        // has_commit: 先查 origin/develop，再查本地 develop（push 可能失败但本地有）
         let has_commit = std::process::Command::new("git")
-            .args(["-C", main_repo, "log", "origin/develop", "--oneline", "--grep", &format!("#{}", bug_id), "-1"])
+            .args(["-C", main_repo, "log", "origin/develop", "--grep", &format!("#{}", bug_id), "--oneline", "-1"])
             .output()
             .map(|o| {
                 let s = String::from_utf8_lossy(&o.stdout).to_string();
                 s.contains("fix(") || s.contains("fix:")
             })
             .unwrap_or(false);
+        let has_commit_local = if has_commit { false } else {
+            std::process::Command::new("git")
+                .args(["-C", main_repo, "log", "develop", "--grep", &format!("#{}", bug_id), "--oneline", "-1"])
+                .output()
+                .map(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).to_string();
+                    s.contains("fix(") || s.contains("fix:")
+                })
+                .unwrap_or(false)
+        };
+        let has_commit_effective = has_commit || has_commit_local;
+        if has_commit_local && !has_commit {
+            tracing::warn!("[{}] Bug#{} fix commit 在本地 develop 但未推送，尝试推送", agent_name, bug_id);
+            for push_attempt in 1..=3 {
+                let push_ok = std::process::Command::new("git")
+                    .args(["-C", main_repo, "push", "origin", "develop"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if push_ok { break; }
+                if push_attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+        }
         // 编译验证（用主仓库）
         let compile_ok = std::process::Command::new("mvn")
             .args(["compile", "-pl", "healthlink-his-application", "-am", "-q"])
@@ -2446,12 +2529,12 @@ pub fn run_harness_loop(
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if has_commit && compile_ok {
-            tracing::info!("[{}] Bug#{} 降级验收通过 (commit+compile) ✅", agent_name, bug_id);
+        if has_commit_effective && compile_ok {
+            tracing::info!("[{}] Bug#{} 降级验收通过 (commit+compile, origin={} local={}) ✅", agent_name, bug_id, has_commit, has_commit_local);
         } else {
-            tracing::warn!("[{}] Bug#{} 降级验收失败: commit={} compile={}", agent_name, bug_id, has_commit, compile_ok);
+            tracing::warn!("[{}] Bug#{} 降级验收失败: commit_origin={} commit_local={} compile={}", agent_name, bug_id, has_commit, has_commit_local, compile_ok);
         }
-        has_commit && compile_ok
+        has_commit_effective && compile_ok
     };
     
     // ═══ 汇总 ═══
