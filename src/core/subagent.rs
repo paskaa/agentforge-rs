@@ -1222,7 +1222,7 @@ fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
 
     // Push to remote
     let push_result = Command::new("git")
-        .args(["-C", &worktree, "push", "origin", branch])
+        .args(["-C", &worktree, "push", "--force", "origin", branch])
         .output();
     match &push_result {
         Ok(o) if o.status.success() => {
@@ -1390,9 +1390,9 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
         }
     }
 
-    // Push to remote agent branch
+    // Push to remote agent branch（--force：worktree 可能已 reset 到 origin/develop）
     let push_result = Command::new("git")
-        .args(["-C", &worktree, "push", "origin", branch])
+        .args(["-C", &worktree, "push", "--force", "origin", branch])
         .output();
     match push_result {
         Ok(o) if o.status.success() => {
