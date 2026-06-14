@@ -2361,6 +2361,10 @@ pub fn run_harness_loop(
         // 先尝试 cherry-pick agent worktree 的 fix commit 到 develop
         let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
         let main_repo = "/root/.openclaw/workspace/his-repo";
+        // 清理主仓库未提交变更，防止 cherry-pick 失败
+        let _ = std::process::Command::new("git")
+            .args(["-C", main_repo, "stash"])
+            .output();
         let fix_hash = std::process::Command::new("git")
             .args(["-C", &worktree, "log", "--oneline", "--grep", &format!("#{}", bug_id), "--format=%H", "-1"])
             .output()
