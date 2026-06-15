@@ -219,11 +219,11 @@ impl AgentExecutor {
         let mut requeued = 0u32;
 
         for bid in &failed_bugs {
-            // 检查重试次数（每个 bug 最多重试 10 次）
+            // 检查重试次数（每个 bug 最多重试 5 次）
             let retry_count: i32 = self.redis.clone()
                 .get(format!("{}:{}", retry_key_prefix, bid))
                 .await.unwrap_or(0);
-            if retry_count >= 10 {
+            if retry_count >= 5 {
                 tracing::warn!("[{}] Bug #{} max retries ({}) reached, skipping", self.agent_id, bid, retry_count);
                 continue;
             }
@@ -706,12 +706,22 @@ impl AgentExecutor {
                     // 清理 fix_active 标记，允许后续重试
                     let _: redis::RedisResult<()> = redis_v.del(format!("fix_active:{}:{}", an_v, bid_v)).await;
                     
-                    // 检查验证重试次数（最多 10 次）
+                    // 检查验证重试次数（最多 3 次）+ 连续相同错误检测
                     let retry_key = format!("verify_retry:{}:{}", an_v, bid_v);
                     let retry_count: i32 = redis_v.clone().get(&retry_key).await.unwrap_or(0);
                     let _: redis::RedisResult<()> = redis_v.clone().set_ex(&retry_key, retry_count + 1, 3600).await;
                     
-                    if retry_count < 10 {
+                    // 连续相同错误检测：哈希失败原因，连续 2 次相同错误则停止重试
+                    let error_fingerprint: String = verification.checks.iter()
+                        .filter(|c| !c.passed)
+                        .map(|c| format!("{}:{}", c.name, c.message.chars().take(100).collect::<String>()))
+                        .collect::<Vec<_>>().join("|");
+                    let error_hash_key = format!("verify_error_hash:{}:{}", an_v, bid_v);
+                    let last_error_hash: String = redis_v.clone().get(&error_hash_key).await.unwrap_or_default();
+                    let _: redis::RedisResult<()> = redis_v.clone().set_ex(&error_hash_key, &error_fingerprint, 3600).await;
+                    let same_error_repeat = !error_fingerprint.is_empty() && error_fingerprint == last_error_hash;
+                    
+                    if retry_count < 3 && !(same_error_repeat && retry_count >= 1) {
                         // 构建失败反馈消息，包含详细失败原因
                         let failed_checks: Vec<String> = verification.checks.iter()
                             .filter(|c| !c.passed)
@@ -752,9 +762,10 @@ impl AgentExecutor {
                         });
                         let queue = format!("agent-work-queue:fix:{}", an_v);
                         let _: redis::RedisResult<i64> = redis_v.clone().rpush(&queue, retry_task.to_string()).await;
-                        tracing::info!("[{}] Bug #{} 验证失败反馈已推送到队列 (重试 {}/10)", an_v, bid_v, retry_count + 1);
+                        tracing::info!("[{}] Bug #{} 验证失败反馈已推送到队列 (重试 {}/3, same_error={})", an_v, bid_v, retry_count + 1, same_error_repeat);
                     } else {
-                        tracing::warn!("[{}] Bug #{} 验证重试已达上限(10次)，标记为最终失败", an_v, bid_v);
+                        let reason = if same_error_repeat { "连续相同错误" } else { "已达重试上限(3次)" };
+                        tracing::warn!("[{}] Bug #{} 验证重试{}，标记为最终失败", an_v, bid_v, reason);
                         // 存储最终失败标记
                         let final_key = format!("verify_final_fail:{}:{}", an_v, bid_v);
                         let _: redis::RedisResult<()> = redis_v.clone().set_ex(&final_key, &verify_detail, 86400).await;
