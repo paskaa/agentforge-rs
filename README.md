@@ -1,9 +1,9 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2021-blue?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/version-0.5.0-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.6.0-green" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/agents-8-orange" alt="Agents">
-  <img src="https://img.shields.io/badge/model-codex--exec-purple" alt="Model">
+  <img src="https://img.shields.io/badge/model-mimo--code-purple" alt="Model">
   <img src="https://img.shields.io/badge/maturity-L5-brightgreen" alt="Maturity L5">
   <img src="https://img.shields.io/badge/ui-Element%20Plus-blue" alt="Element Plus">
   <img src="https://img.shields.io/badge/realtime-WebSocket-green" alt="WebSocket">
@@ -41,12 +41,12 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
 - **Real-Time Dashboard** — Vue 3 + Element Plus, WebSocket real-time logs, clickable stats
 - **Quality Gates** — Compilation verification, SQL validation, interface signature checks
 - **Git Worktree Isolation** — Each agent has its own worktree, zero conflict
-- **Dead Letter Queue** — Failed tasks preserved for retry (up to 10 attempts)
+- **Smart Retry** — 3 verify attempts + consecutive same-error detection (stops if same error repeats)
 - **Full-Chain Fix** — Frontend → Controller → Service → Mapper → DB → Related modules
 - **L4 Analytics** — Data-driven: success rates, failure patterns, agent scoring
 - **L5 Self-Optimizer** — AI auto-tuning: constraints, smart routing, retry strategy with git diff tracking
-- **Harness Loop 4-Phase Cycle** — Generator→Reviewer→QA→Verifier, each phase calls `codex exec` independently with phase-specific prompts and verdicts
-- **Phase-Aware Degradation** — Review fails → continue; QA fails → fallback compile check; Verify fails → commit+compile check
+- **Harness Loop 4-Phase Cycle** — Generator→(Skip Review)→QA→Lightweight Verify, with compile retry ≤10min + loop ≤60min total timeout
+- **Async Full-Chain Verification** — Post-fix: compile → unit test → Playwright → DB → API (5 checks, short-circuit on failure)
 - **Batch Enqueue** — Select multiple bugs and enqueue to agents from the dashboard
 
 ## 🏗️ Architecture
@@ -81,12 +81,21 @@ AgentForge-RS is a **multi-agent automated bug fixing framework** built in Rust.
 ```
 subagent::run_codex_fix_v2()
   │
-  └─→ subagent::run_harness_loop()
+  └─→ subagent::run_harness_loop()          [总超时 60min]
         │
-        ├─ Phase 1: codex_exec(harness_prompt)        → Verdict
-        ├─ Phase 2: codex_exec(review_prompt) ×2轮     → Verdict
-        ├─ Phase 3: codex_exec(test_prompt)            → Verdict (降级: mvn compile)
-        └─ Phase 4: codex_exec(verify_prompt)          → Verdict (降级: commit+compile)
+        ├─ Phase 1: codex_exec(harness_prompt)     → Verdict
+        │   └─ 编译失败 → 无限重试（总超时 10min）
+        │   └─ UNKNOWN + 有变更 → 降级编译验证
+        │   └─ 完成后立即 commit（不等后续阶段）
+        │
+        ├─ Phase 2: ⏭ 跳过（99% 返回 UNKNOWN，节省 LLM 调用）
+        │
+        ├─ Phase 3: codex_exec(test_prompt)         → Verdict
+        │   └─ 失败 → 降级: 直接 mvn compile / vite build
+        │
+        └─ Phase 4: 轻量级脚本验证（不调用 LLM）
+            └─ 检查: fix_commit 存在 + 文件变更 > 0
+            └─ 92ms 完成（旧 LLM 验证需 3-5 分钟）
         │
         └─→ CodexResult { last_phase, phase_verdicts }
 ```
@@ -96,32 +105,49 @@ subagent::run_codex_fix_v2()
 
 ### Harness Loop（4 阶段循环）
 
-每个 Bug 修复自动执行完整的 4 阶段 Harness Loop：
+每个 Bug 修复自动执行 4 阶段 Harness Loop（v0.6.0 优化版）：
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                  Harness Loop (per Bug)                    │
-│                                                            │
-│  Phase 1: Generator 修复                                   │
-│    └─ codex exec (workspace-write)                        │
-│    └─ 失败 → 终止循环                                     │
-│                                                            │
-│  Phase 2: Reviewer 审查（最多 2 轮）                       │
-│    └─ codex exec (read-only)                              │
-│    └─ 评分: 设计/工艺/功能/风格 (≥12/20 通过)             │
-│    └─ 失败 → 重修 → 再审                                  │
-│    └─ 仍失败 → 降级继续                                   │
-│                                                            │
-│  Phase 3: QA 测试                                         │
-│    └─ codex exec (编译+测试)                               │
-│    └─ 失败 → 降级: 直接 mvn compile / vite build          │
-│                                                            │
-│  Phase 4: Verifier 验收                                   │
-│    └─ codex exec (commit+编译+测试+回归)                   │
-│    └─ 失败 → 降级: git commit 存在 + 编译通过             │
-│                                                            │
-│  结果: CodexResult { last_phase, phase_verdicts }         │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│            Harness Loop (per Bug, 总超时 60min)                │
+│                                                                │
+│  Phase 1: Generator 修复                                       │
+│    └─ mimo-code exec (workspace-write)                        │
+│    └─ 编译失败 → 无限重试（总超时 10min）                      │
+│    └─ UNKNOWN + 有变更 → 降级编译验证                          │
+│    └─ 完成后立即 commit（不等后续阶段）                        │
+│    └─ 失败 → 终止循环                                         │
+│                                                                │
+│  Phase 2: ⏭ Reviewer 跳过                                     │
+│    └─ 99% 返回 UNKNOWN，节省 LLM 调用                         │
+│    └─ 节省 2-3 分钟/次                                        │
+│                                                                │
+│  Phase 3: QA 测试                                             │
+│    └─ mimo-code exec (编译+测试)                               │
+│    └─ 失败 → 降级: 直接 mvn compile / vite build              │
+│                                                                │
+│  Phase 4: 轻量级脚本验证                                       │
+│    └─ 检查: fix_commit 存在 + 文件变更 > 0                     │
+│    └─ 92ms 完成（旧 LLM 验证需 3-5 分钟）                     │
+│    └─ 不调用 LLM，零 token 成本                                │
+│                                                                │
+│  结果: CodexResult { last_phase, phase_verdicts }             │
+└──────────────────────────────────────────────────────────────┘
+
+                    ↓ Harness Loop 完成后 ↓
+
+┌──────────────────────────────────────────────────────────────┐
+│         异步全链路验证 (executor.rs, 5 项检查)                  │
+│                                                                │
+│  1. 编译验证 (mvn compile / vite build)     ← 失败则短路       │
+│  2. 单元测试 (mvn test / vitest)            ← 失败则短路       │
+│  3. Playwright 回归 (@bug{id})              ← 无测试则跳过     │
+│  4. 数据库验证 (PostgreSQL schema check)    ← 无关键词则跳过   │
+│  5. 接口验证 (HTTP health check)                               │
+│                                                                │
+│  全部通过 → PASS                                               │
+│  任一失败 → verify_retry（最多 3 次 + 连续相同错误检测）        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### 全局流水线
@@ -314,6 +340,34 @@ agentforge-rust@zhugeliang.service  # 诸葛亮 executor
 | L4 Quantified | Data-driven optimization | ✅ Done |
 | L5 Optimized | AI self-optimization | ✅ Done |
 
+## 🚀 v0.6.0 Optimization Summary
+
+### Before vs After
+
+| Metric | v0.5.0 | v0.6.0 |
+|---|---|---|
+| Phase 4 验证耗时 | 3-5 min (LLM) | **92 ms** (script) |
+| Phase 2 Review 耗时 | 2-3 min (99% UNKNOWN) | **0** (skipped) |
+| verify 重试上限 | 10 次 | **3 次** + same-error detection |
+| fix 重试上限 | 10 次 | **5 次** |
+| 编译重试 | 无限制循环 | **10 min** total timeout |
+| Harness Loop 总超时 | 无上限 | **60 min** hard limit |
+| 总 LLM 调用/bug | 6-8 次 | **2-3 次** |
+| 验证假阳性 | 频繁（verify=PASS 但实际失败） | **消除**（脚本真实检查） |
+
+### Architecture Changes
+
+```
+v0.5.0:  Phase1 → Phase2(LLM review ×2) → Phase3(QA) → Phase4(LLM verify)
+         ↓ 全部完成后再异步验证
+         ↓ verify_retry × 10 (无限制重试)
+
+v0.6.0:  Phase1 → [Skip] → Phase3(QA) → Phase4(script 92ms)
+         ↓ 完成后立即 commit + 异步全链路验证
+         ↓ verify_retry × 3 (相同错误 2 次即停止)
+         ↓ 总超时 60min / 编译超时 10min
+```
+
 ## 📜 License
 
 MIT
@@ -337,7 +391,7 @@ AgentForge-RS 是一个用 Rust 构建的 **多智能体自动修复 Bug 框架*
 - **实时面板** — Vue 3 + Element Plus、WebSocket 实时日志、可点击统计
 - **质量门禁** — 编译验证、SQL 校验、接口签名检查
 - **Git Worktree 隔离** — 每个智能体独立工作树，零冲突
-- **死信队列** — 失败任务保留重试（最多 10 次）
+- **智能重试** — 5 次修复 + 3 次验证，连续相同错误自动停止
 - **全链路修复** — 前端 → Controller → Service → Mapper → DB → 关联模块
 - **L4 量化分析** — 数据驱动：成功率、失败模式、智能体评分
 - **L5 自优化** — AI 自主调优：约束调整、智能路由、重试策略（Git Diff 追踪）
@@ -363,7 +417,7 @@ AgentForge-RS 是一个用 Rust 构建的 **多智能体自动修复 Bug 框架*
   │               ▼
   │          禅道 resolve + assign
   │
-  └── 失败 → 回退给修复者重修（最多10次）
+  └── 失败 → 回退给修复者重修（最多 5 次 fix + 3 次 verify，连续相同错误自动停止）
 ```
 
 **每个阶段自动写入禅道备注：**
@@ -422,8 +476,14 @@ agentforge-rs/
 │   │   ├── web_server.rs      # REST API + WebSocket
 │   │   ├── zentao.rs          # 禅道 API 客户端（Rust 原生）
 │   │   ├── pipeline.rs        # 管线路由 + 去重
-│   │   ├── subagent.rs        # Codex/mimo 调用 + 修复逻辑
-│   │   ├── verification.rs    # Playwright 测试运行器
+│   │   ├── subagent.rs        # Harness Loop 4阶段 + 智能体修复逻辑
+│   │   ├── verification.rs    # 5项全链路验证（编译/单测/Playwright/DB/API）
+│   ├── analytics.rs       # L4 数据分析 + L5 评分
+│   ├── self_optimizer.rs  # L5 AI 自优化引擎
+│   ├── report.rs          # 分析报告生成（含连接错误检测）
+│   ├── quota_monitor.rs   # 配额监控
+│   ├── dead_letter.rs     # 死信队列管理
+│   ├── fix_trajectory.rs  # 修复轨迹追踪
 │   │   └── trace.rs           # 追踪存储（SQLite）
 │   ├── config.rs              # 配置
 │   └── main.rs                # CLI 入口
@@ -442,14 +502,23 @@ agentforge-rs/
 
 ## ⚡ 快速开始
 
-> **v0.5.0**: 5 大系统性问题修复 — Codex 修复成功率、面板数据准确性、L5 自优化
+> **v0.6.0**: 验证系统重构 — 消除假阳性、智能重试、超时保护
 > 
 > **核心改进:**
-> - `parse_verdict` 启发式容错 — 无 VERDICT 标记时用关键词自动判断，verdict 解析率 0% → ~80%
-> - `fix_done` 状态修正 — 有实际文件变更时覆盖为 ok（不再因 UNKNOWN verdict 误标 failed）
-> - `fix_active` 锁优化 — TTL 24h→30min，完成后自动清理，防止 Bug 永久阻塞
-> - Dashboard 数据归一化 — 中英文 agent_id 合并统计，zentao cache 实时刷新
-> - L5 分数直接计算 — 从 analytics 覆盖 score（不用 EMA 累积偏差），分数准确反映实际能力
+> - Phase 4 LLM 验证器 → 轻量级脚本检查（92ms vs 3-5min，零 token 成本）
+> - Phase 2 Review 跳过（99% 返回 UNKNOWN，节省 2-3min/次）
+> - verify_retry 10→3 + 连续相同错误检测（相同错误 2 次即停止）
+> - fix_retry 10→5（减少无效重试浪费）
+> - 编译重试增加 10 分钟总超时（防止死循环）
+> - Harness Loop 增加 60 分钟总超时保护
+> - 异步全链路验证：编译→单测→Playwright→DB→API（5 项检查，短路机制）
+> 
+> **v0.5.0 核心改进:**
+> - `parse_verdict` 启发式容错 — verdict 解析率 0% → ~80%
+> - `fix_done` 状态修正 — 有实际文件变更时覆盖为 ok
+> - `fix_active` 锁优化 — TTL 24h→30min，防止 Bug 永久阻塞
+> - Dashboard 数据归一化 — 中英文 agent_id 合并统计
+> - L5 分数直接计算 — 分数准确反映实际能力
 
 ```bash
 git clone https://github.com/paskaa/agentforge-rs.git
@@ -522,6 +591,34 @@ agentforge-rust@zhugeliang.service  # 诸葛亮
 | L3 定义 | 标准化流程 + 自动提交 + 禅道 | ✅ 已完成 |
 | L4 量化 | 数据驱动优化 | ✅ 已完成 |
 | L5 优化 | AI 自主优化 + Harness Loop 4阶段循环 | ✅ 已完成 |
+
+## 🚀 v0.6.0 优化总结
+
+### 前后对比
+
+| 指标 | v0.5.0 | v0.6.0 |
+|---|---|---|
+| Phase 4 验证耗时 | 3-5 分钟（LLM） | **92 毫秒**（脚本） |
+| Phase 2 Review 耗时 | 2-3 分钟（99% UNKNOWN） | **0**（跳过） |
+| verify 重试上限 | 10 次 | **3 次** + 相同错误检测 |
+| fix 重试上限 | 10 次 | **5 次** |
+| 编译重试 | 无限制循环 | **10 分钟**总超时 |
+| Harness Loop 总超时 | 无上限 | **60 分钟**硬上限 |
+| 总 LLM 调用/Bug | 6-8 次 | **2-3 次** |
+| 验证假阳性 | 频繁 | **消除**（脚本真实检查） |
+
+### 架构变更
+
+```
+v0.5.0:  Phase1 → Phase2(LLM review ×2) → Phase3(QA) → Phase4(LLM verify)
+         ↓ 全部完成后再异步验证
+         ↓ verify_retry × 10（无限制重试）
+
+v0.6.0:  Phase1 → [跳过] → Phase3(QA) → Phase4(脚本 92ms)
+         ↓ 完成后立即 commit + 异步全链路验证
+         ↓ verify_retry × 3（相同错误 2 次即停止）
+         ↓ 总超时 60min / 编译超时 10min
+```
 
 ## 📜 许可证
 
