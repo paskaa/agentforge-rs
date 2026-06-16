@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, Condvar, atomic::{AtomicU32, AtomicBool, Ordering}};
 use std::time::Instant;
 
-const MAX_CONCURRENT: u32 = 2;
+const MAX_CONCURRENT: u32 = 1;
 static SEM_COUNTER: AtomicU32 = AtomicU32::new(0);
 static SEM_MTX: Mutex<()> = Mutex::new(());
 static SEM_CV: Condvar = Condvar::new();
@@ -68,21 +68,37 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
     let full_task = if agent_ctx.is_empty() { task.to_string() } else { format!("{}\n\n{}", agent_ctx, task) };
     let work_dir = agent_name.map(|a| { let d = format!("/tmp/agentforge-worktrees/{}", a); std::fs::create_dir_all(&d).ok(); d }).map(std::path::PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     tracing::info!("[agent_exec] spawning: {} in {:?}", mimo_bin, work_dir);
-    let mut cmd = Command::new(&mimo_bin);
-    cmd.arg("run").arg("-y").arg("--no-tui").arg("--max-iterations").arg("20").arg(&full_task);
-    cmd.current_dir(&work_dir); cmd.stdin(Stdio::null()); cmd.stdout(Stdio::piped()); cmd.stderr(Stdio::piped());
-    let child = match cmd.spawn() { Ok(c) => c, Err(e) => { return CodexExecResult { success: false, final_message: format!("spawn failed: {}", e), verdict: Verdict::Fail(format!("spawn: {}", e)), total_tokens: 0, elapsed_ms: start.elapsed().as_millis() as u64, stderr: e.to_string() }; } };
-    let output = match child.wait_with_output() { Ok(o) => o, Err(e) => { return CodexExecResult { success: false, final_message: format!("wait failed: {}", e), verdict: Verdict::Fail(format!("wait: {}", e)), total_tokens: 0, elapsed_ms: start.elapsed().as_millis() as u64, stderr: e.to_string() }; } };
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_success = output.status.success();
-    let final_message = extract_mimo_response(&stdout);
-    let total_tokens = parse_mimo_tokens(&stdout);
-    let verdict = parse_verdict(if final_message.is_empty() { &stdout } else { &final_message });
-    let success = exit_success && verdict.is_pass();
-    tracing::info!("[agent_exec] completed: exit={} elapsed={}ms tokens={}", output.status, elapsed_ms, total_tokens);
-    CodexExecResult { success, final_message: if final_message.is_empty() { stdout.clone() } else { final_message }, verdict, total_tokens, elapsed_ms, stderr }
+    let mut attempt = 0u32;
+    let max_attempts = 5u32;
+    let result = loop {
+        attempt += 1;
+        let mut cmd = Command::new(&mimo_bin);
+        cmd.arg("run").arg("-y").arg("--no-tui").arg("--max-iterations").arg("20").arg(&full_task);
+        cmd.current_dir(&work_dir); cmd.stdin(Stdio::null()); cmd.stdout(Stdio::piped()); cmd.stderr(Stdio::piped());
+        let child = match cmd.spawn() { Ok(c) => c, Err(e) => { break CodexExecResult { success: false, final_message: format!("spawn failed: {}", e), verdict: Verdict::Fail(format!("spawn: {}", e)), total_tokens: 0, elapsed_ms: start.elapsed().as_millis() as u64, stderr: e.to_string() }; } };
+        let output = match child.wait_with_output() { Ok(o) => o, Err(e) => { break CodexExecResult { success: false, final_message: format!("wait failed: {}", e), verdict: Verdict::Fail(format!("wait: {}", e)), total_tokens: 0, elapsed_ms: start.elapsed().as_millis() as u64, stderr: e.to_string() }; } };
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_success = output.status.success();
+        let final_message = extract_mimo_response(&stdout);
+        let total_tokens = parse_mimo_tokens(&stdout);
+        let verdict = parse_verdict(if final_message.is_empty() { &stdout } else { &final_message });
+        let success = exit_success && verdict.is_pass();
+        tracing::info!("[agent_exec] completed: attempt={} exit={} elapsed={}ms tokens={}", attempt, output.status, elapsed_ms, total_tokens);
+        if !stderr.is_empty() {
+            let snippet: String = stderr.chars().take(500).collect();
+            tracing::warn!("[agent_exec] stderr: {}", snippet);
+        }
+        if !exit_success && (stderr.contains("429") || stdout.contains("429")) && attempt < max_attempts {
+            let delay = std::time::Duration::from_secs(60 * attempt as u64);
+            tracing::warn!("[agent_exec] 429 rate limit, retry {} in {}s", attempt + 1, delay.as_secs());
+            std::thread::sleep(delay);
+            continue;
+        }
+        break CodexExecResult { success, final_message: if final_message.is_empty() { stdout.clone() } else { final_message }, verdict, total_tokens, elapsed_ms, stderr };
+    };
+    result
 }
 
 fn extract_mimo_response(stdout: &str) -> String {

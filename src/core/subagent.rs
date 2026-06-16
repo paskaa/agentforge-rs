@@ -1275,10 +1275,45 @@ fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
     let hash = hash_output
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    if hash.is_empty() || hash.len() < 8 {
-        tracing::warn!("[{}] Bug#{} 找不到修复 commit", agent_name, bug_id);
-        return;
-    }
+    let fix_hash_result = if hash.is_empty() || hash.len() < 8 {
+        // grep 找不到，取分支最新 commit（mimo-code 可能用不同消息 commit 了）
+        let head_hash = Command::new("git")
+            .args(["-C", &worktree, "rev-parse", "HEAD"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let dev_hash = Command::new("git")
+            .args(["-C", &worktree, "rev-parse", "origin/develop"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if !head_hash.is_empty() && head_hash != dev_hash {
+            // 验证 HEAD 不是陈旧 commit：检查 HEAD 和 origin/develop 之间是否有旧 commit
+            let ahead_count = Command::new("git")
+                .args(["-C", &worktree, "rev-list", "--count", "origin/develop..HEAD"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().unwrap_or(0))
+                .unwrap_or(0);
+            if ahead_count > 2 {
+                tracing::warn!("[{}] Bug#{} HEAD 领先 origin/develop {} 个 commit，取最后一个（最新）", agent_name, bug_id, ahead_count);
+                // 取 origin/develop 之后的第一个 commit（最近的）
+                let fresh = Command::new("git")
+                    .args(["-C", &worktree, "rev-parse", "origin/develop..HEAD"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().last().unwrap_or("").trim().to_string())
+                    .unwrap_or_default();
+                if !fresh.is_empty() { fresh } else { head_hash }
+            } else {
+                tracing::info!("[{}] Bug#{} grep 未找到，使用 HEAD: {} (ahead by {})", agent_name, bug_id, head_hash, ahead_count);
+                head_hash
+            }
+        } else {
+            tracing::warn!("[{}] Bug#{} 找不到修复 commit (HEAD==develop)，跳过 push", agent_name, bug_id);
+            return;
+        }
+    } else {
+        hash.clone()
+    };
 
     // Cherry-pick to develop
     let main_repo = "/root/.openclaw/workspace/his-repo";
@@ -1289,17 +1324,23 @@ fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
     let author = format!("{} <{}@gentronhealth.com>", agent_name, agent_name);
     let cherry = Command::new("git")
         .args(["-C", main_repo, "cherry-pick", "--strategy=recursive", "-X", "theirs",
-               "--author", &author, &hash])
+               "--author", &author, &fix_hash_result])
         .output();
     match cherry {
         Ok(o) if o.status.success() => {
             let pushed = push_origin_retry(main_repo, "develop", 3);
             tracing::info!("[{}] Bug#{} cherry-picked to develop {} ✅", agent_name, bug_id, if pushed { "pushed" } else { "local only" });
+            let _ = Command::new("redis-cli")
+                .args(["-p", "16379", "SET", &format!("cherry_pick_ok:{}", bug_id), "true", "EX", "300"])
+                .output();
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             if stderr.contains("empty commit") || stderr.contains("No changes") {
                 tracing::info!("[{}] Bug#{} cherry-pick: changes already on develop (empty commit) ✅", agent_name, bug_id);
+                let _ = Command::new("redis-cli")
+                    .args(["-p", "16379", "SET", &format!("cherry_pick_ok:{}", bug_id), "true", "EX", "300"])
+                    .output();
             } else {
                 let _ = Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
                 // Fallback: checkout files directly
@@ -1335,10 +1376,41 @@ fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
 
 fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str) {
     let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+    // 先检查主仓库是否有 mimo-code 留下的变更，同步到 worktree
+    let main_repo = "/root/.openclaw/workspace/his-repo";
+    let main_diff = Command::new("git")
+        .args(["-C", main_repo, "diff", "--name-only"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if !main_diff.is_empty() {
+        tracing::info!("[{}] Bug#{} 主仓库有 {} 个文件变更，同步到 worktree", agent_name, bug_id, main_diff.lines().count());
+        for file in main_diff.lines() {
+            let file = file.trim();
+            if file.is_empty() { continue; }
+            let src = format!("{}/{}", main_repo, file);
+            let dst = format!("{}/{}", worktree, file);
+            if std::path::Path::new(&src).exists() {
+                if let Some(parent) = std::path::Path::new(&dst).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::copy(&src, &dst);
+            }
+        }
+        // 清理主仓库变更
+        let _ = Command::new("git")
+            .args(["-C", main_repo, "checkout", "--", "."])
+            .output();
+    }
     let add_result = Command::new("git")
-        .args(["-C", &worktree, "add", "--all", "--",
-                ":!*.orig", ":!*.mjs", ":!*.timestamp*"])
+        .args(["-C", &worktree, "add", "--all"])
         .output();
+    if let Ok(ref o) = add_result {
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        if !stderr.is_empty() {
+            tracing::warn!("[{}] Bug#{} git add stderr: {}", agent_name, bug_id, stderr.chars().take(200).collect::<String>());
+        }
+    }
     match &add_result {
         Ok(o) if !o.status.success() => {
             tracing::error!("[{}] Bug#{} git add 失败: {}", agent_name, bug_id,
@@ -1357,22 +1429,23 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
     // 校验提交信息质量：至少包含非空根因或修复方案
     let final_msg = if root_causes.iter().all(|c| c.contains("存在的问题") || c.contains("修改相关"))
         && fixes.iter().all(|f| f == "修改相关代码文件") {
-        // 退化信息，用更具体的模板
-        format!("fix(#{}): {}
-
-由 AI Agent ({}) 自动修复，请查看 diff 确认变更内容。", bug_id, bug_title, agent_name)
+        format!("fix(#{}): {}", bug_id, bug_title)
     } else {
         commit_msg
     };
+    // Cap commit message to 500 chars to avoid git issues
+    let final_msg = if final_msg.len() > 500 { format!("fix(#{}): {}", bug_id, bug_title) } else { final_msg };
 
+    tracing::info!("[{}] Bug#{} commit message (len={}): {}", agent_name, bug_id, final_msg.len(), final_msg.chars().take(200).collect::<String>());
     let commit_result = Command::new("git")
         .args(["-C", &worktree, "commit", "-m", &final_msg])
         .output();
     let commit_ok = match &commit_result {
         Ok(o) if !o.status.success() => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            tracing::warn!("[{}] Bug#{} git commit 失败 (可能已被 mimo-code 提交): {}", agent_name, bug_id, stderr.chars().take(300).collect::<String>());
-            // 检查分支上是否已有此 bug 的 commit（mimo-code 可能已自行提交）
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            tracing::warn!("[{}] Bug#{} git commit 失败 (exit={}): stderr={} stdout={}", agent_name, bug_id, o.status, stderr.chars().take(300).collect::<String>(), stdout.chars().take(200).collect::<String>());
+            // 策略1: 检查分支上是否已有此 bug 的 commit
             let existing = Command::new("git")
                 .args(["-C", &worktree, "log", "--oneline", "--grep", &format!("#{}", bug_id), "-1"])
                 .output()
@@ -1385,8 +1458,25 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                 tracing::info!("[{}] Bug#{} 已有 commit: {}，跳过 commit 继续 push", agent_name, bug_id, existing.unwrap_or_default());
                 true
             } else {
-                tracing::error!("[{}] Bug#{} 无现有 commit 且 commit 失败，中止", agent_name, bug_id);
-                return;
+                // 策略2: 工作区干净说明 mimo-code 已自行 commit，取 HEAD
+                let status = Command::new("git")
+                    .args(["-C", &worktree, "status", "--porcelain"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if status.is_empty() {
+                    // 工作区干净，取最新 commit
+                    let head = Command::new("git")
+                        .args(["-C", &worktree, "log", "--oneline", "-1"])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
+                    tracing::info!("[{}] Bug#{} 工作区干净，mimo-code 已 commit: {}，使用该 commit", agent_name, bug_id, head);
+                    true
+                } else {
+                    tracing::error!("[{}] Bug#{} 无现有 commit 且工作区有未提交变更，中止", agent_name, bug_id);
+                    return;
+                }
             }
         }
         Err(e) => {
@@ -1405,7 +1495,7 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
     let compile_result = if agent_name == "zhaoyun" {
         Command::new("npx")
             .args(["vite", "build", "--mode", "dev"])
-            .current_dir(&worktree)
+            .current_dir(format!("{}/healthlink-his-ui", worktree))
             .output()
     } else {
         Command::new("mvn")
@@ -1660,7 +1750,9 @@ fn extract_fix_details(stdout: &str, bug_title: &str) -> (Vec<String>, Vec<Strin
 /// Build structured comment for Zentao resolve.
 fn build_zentao_comment(bug_id: &str, bug_title: &str, root_causes: &[String], fixes: &[String]) -> String {
     let mut comment = String::new();
-    comment.push_str(&format!("fix(#{}): {}", bug_id, bug_title));
+    // Cap title to 200 chars to avoid excessively long commit messages
+    let short_title = if bug_title.len() > 200 { format!("{}...", &bug_title[..197]) } else { bug_title.to_string() };
+    comment.push_str(&format!("fix(#{}): {}", bug_id, short_title));
     comment.push_str("
 
 根因：
@@ -2061,6 +2153,24 @@ pub fn run_harness_loop(
     let mut phase_verdicts: Vec<(String, String)> = Vec::new();
     let mut compile_passed = false; // 跨阶段追踪编译是否通过
     
+    // ═══ 同步 worktree 到最新 develop ═══
+    let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
+    let _ = Command::new("git").args(["-C", &worktree, "stash", "--include-untracked"]).output();
+    let _ = Command::new("git").args(["-C", &worktree, "fetch", "origin", "develop"]).output();
+    let merge_result = Command::new("git")
+        .args(["-C", &worktree, "merge", "origin/develop", "--no-edit", "-X", "theirs"])
+        .output();
+    match merge_result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("[{}] Bug#{} worktree 已同步到最新 develop", agent_name, bug_id);
+        }
+        _ => {
+            let _ = Command::new("git").args(["-C", &worktree, "merge", "--abort"]).output();
+            let _ = Command::new("git").args(["-C", &worktree, "reset", "--hard", "origin/develop"]).output();
+            tracing::info!("[{}] Bug#{} worktree reset 到 origin/develop", agent_name, bug_id);
+        }
+    }
+    
     // 确定沙箱权限
     let sandbox = if agent_name == "zhaoyun" || agent_name == "guanyu" || agent_name == "xunyu" {
         "workspace-write"
@@ -2309,7 +2419,7 @@ pub fn run_harness_loop(
             // 设置持久化"已修复"标记（redis-cli 同步调用，30天TTL）
             let fixed_key = format!("bug_fixed:{}", bug_id);
             let _ = Command::new("redis-cli")
-                .args(["SET", &fixed_key, "fixed", "EX", "2592000"])
+                .args(["-p", "16379", "SET", &fixed_key, "fixed", "EX", "2592000"])
                 .output();
         }
     }
@@ -2423,6 +2533,10 @@ pub fn run_harness_loop(
                 // cherry-pick 成功 或 变更已在 develop 上（empty commit = 已合入）
                 let _ = std::process::Command::new("git").args(["-C", main_repo, "push", "origin", "develop"]).output();
                 tracing::info!("[{}] Bug#{} 降级验收: cherry-pick 到 develop 成功 (empty={})", agent_name, bug_id, !cherry_ok);
+            // 标记 cherry-pick 成功（empty commit = 变更已在 develop）
+            let _ = Command::new("redis-cli")
+                .args(["-p", "16379", "SET", &format!("cherry_pick_ok:{}", bug_id), "true", "EX", "300"])
+                .output();
             } else {
                 let _ = std::process::Command::new("git").args(["-C", main_repo, "cherry-pick", "--abort"]).output();
                 let changed = std::process::Command::new("git")
@@ -2552,7 +2666,16 @@ pub fn run_harness_loop(
     
     // ═══ 自动提交：如果 Codex 产生了代码变更，commit + push + cherry-pick ═══
     // run_harness_loop 不会自动提交，必须在此处处理
-    if changes > 0 {
+    // 注意：changes 只统计未提交的变更。如果 mimo-code 已自行 commit，changes=0
+    // 但 HEAD 可能领先 origin/develop，需要 push + cherry-pick
+    let worktree_for_check = format!("/tmp/agentforge-worktrees/{}", agent_name);
+    let committed_ahead = Command::new("git")
+        .args(["-C", &worktree_for_check, "rev-list", "--count", "origin/develop..HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().unwrap_or(0))
+        .unwrap_or(0);
+    let effective_changes = if changes > 0 { changes } else { committed_ahead };
+    if effective_changes > 0 {
         let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
         // 检查是否有未提交的变更
         let status_out = Command::new("git")
@@ -2573,13 +2696,19 @@ pub fn run_harness_loop(
         // 设置持久化"已修复"标记（防止 scan_analysis_docs 重复入队）
         let fixed_key = format!("bug_fixed:{}", bug_id);
         let _ = Command::new("redis-cli")
-            .args(["SET", &fixed_key, "fixed", "EX", "2592000"])
+            .args(["-p", "16379", "SET", &fixed_key, "fixed", "EX", "2592000"])
             .output();
 
         // ═══ 铁律: 修复后必须写禅道备注 ═══
         // 检查 develop 上是否有 commit（cherry-pick 是否成功）
         let main_repo = "/root/.openclaw/workspace/his-repo";
-        let has_develop_commit = Command::new("git")
+        let cherry_pick_ok = Command::new("redis-cli")
+            .args(["-p", "16379", "GET", &format!("cherry_pick_ok:{}", bug_id)])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false);
+        let has_develop_commit = cherry_pick_ok
+            || Command::new("git")
             .args(["-C", main_repo, "log", "--oneline", "--grep", &format!("Bug #{}", bug_id), "-1"])
             .output()
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -2631,6 +2760,13 @@ fn count_changed_files(agent_name: &str, bug_id: &str) -> u32 {
         .args(["diff", "--name-only"])
         .current_dir(&worktree)
         .output();
+    // Log what files are changed
+    if let Ok(ref o) = uncommitted {
+        let files = String::from_utf8_lossy(&o.stdout);
+        if !files.trim().is_empty() {
+            tracing::info!("[{}] count_changed: worktree uncommitted: {}", agent_name, files.trim());
+        }
+    }
     let staged = Command::new("git")
         .args(["diff", "--cached", "--name-only"])
         .current_dir(&worktree)
@@ -2659,17 +2795,6 @@ fn count_changed_files(agent_name: &str, bug_id: &str) -> u32 {
         for o in main_outputs.into_iter().flatten() {
             let stdout = String::from_utf8_lossy(&o.stdout);
             total += stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32;
-        }
-        // 也检查最近commit的变更
-        if total == 0 {
-            let committed = Command::new("git")
-                .args(["diff", "--name-only", "HEAD~1"])
-                .current_dir(&worktree)
-                .output();
-            if let Ok(o) = committed {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                total += stdout.lines().filter(|l| !l.trim().is_empty()).count() as u32;
-            }
         }
     }
     total
