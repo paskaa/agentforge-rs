@@ -172,10 +172,12 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
         .lines().take(15).collect::<Vec<_>>().join("\n");
     
     // 加载统一铁律文件
-    let iron_laws = load_skill("/root/.codex/rules/IRON_LAWS.md");
+    let iron_laws_full = load_skill("/root/.codex/rules/IRON_LAWS.md");
+    let iron_laws = iron_laws_full.chars().take(3000).collect::<String>();
 
     // 加载模块索引（铁律：修复人员必须读模块索引快速定位）
-    let module_index = load_skill("/root/.openclaw/workspace/his-repo/MD/MODULE_INDEX.md");
+    let module_index_full = load_skill("/root/.openclaw/workspace/his-repo/MD/MODULE_INDEX.md");
+    let module_index = module_index_full.chars().take(5000).collect::<String>();
 
     // 加载诸葛亮分析文档（铁律：修复人员必须先读分析文档并验证正确性）
     let analysis_doc = {
@@ -288,13 +290,14 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
 {bug_details}
 
 ## 修复流程
-1. 读 AGENTS.md 了解项目规范
-2. 全链路分析（6环）：前端→Controller→Service→Mapper→DB→关联模块
-3. 用 apply_patch 修改文件，一次修彻底
-4. 编译验证：vue-tsc + vite build（前端）或 mvn compile（后端）
-5. 输出变更摘要（根因 + 修复）
+1. 分析根因（上方诸葛亮分析 + 代码模块索引已提供）
+2. 用 apply_patch 修改必要文件，一次修彻底
+3. 输出变更摘要（根因 + 修复了哪些文件）
 
-请分析并直接修改文件修复。不要用 git。
+注意：
+- 直接用 apply_patch 修改文件，不要只是分析
+- 不要用 git
+- 修改后输出 VERDICT: PASS 或 VERDICT: FAIL [原因]
 "#,
         role_name=role_name, role_desc=role_desc, expertise=expertise,
         constraints=constraints,

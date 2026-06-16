@@ -73,7 +73,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
     let result = loop {
         attempt += 1;
         let mut cmd = Command::new(&mimo_bin);
-        cmd.arg("run").arg("-y").arg("--no-tui").arg("--max-iterations").arg("20").arg(&full_task);
+        cmd.arg("run").arg("-y").arg("--no-tui").arg("--sandbox").arg("danger-full-access").arg("--max-iterations").arg("8").arg(&full_task);
         cmd.current_dir(&work_dir); cmd.stdin(Stdio::null()); cmd.stdout(Stdio::piped()); cmd.stderr(Stdio::piped());
         let child = match cmd.spawn() { Ok(c) => c, Err(e) => { break CodexExecResult { success: false, final_message: format!("spawn failed: {}", e), verdict: Verdict::Fail(format!("spawn: {}", e)), total_tokens: 0, elapsed_ms: start.elapsed().as_millis() as u64, stderr: e.to_string() }; } };
         let output = match child.wait_with_output() { Ok(o) => o, Err(e) => { break CodexExecResult { success: false, final_message: format!("wait failed: {}", e), verdict: Verdict::Fail(format!("wait: {}", e)), total_tokens: 0, elapsed_ms: start.elapsed().as_millis() as u64, stderr: e.to_string() }; } };
