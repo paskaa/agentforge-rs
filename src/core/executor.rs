@@ -320,20 +320,25 @@ impl AgentExecutor {
             let lock_key = format!("fix_active:{}:{}", self.agent_id, bid);
             if self.redis.clone().exists::<_, bool>(&lock_key).await.unwrap_or(false) { continue; }
 
-            // 路由校验：后端bug不应分给前端，前端bug不应分给后端
-            let title_lower = content.to_lowercase();
-            let is_backend_bug = title_lower.contains("java") || title_lower.contains("service")
-                || title_lower.contains("mapper") || title_lower.contains("sql")
-                || title_lower.contains("接口") || title_lower.contains("后端")
-                || title_lower.contains("数据库") || title_lower.contains("api");
-            let is_frontend_bug = title_lower.contains("前端") || title_lower.contains("vue")
-                || title_lower.contains("界面") || title_lower.contains("显示")
-                || title_lower.contains("弹窗") || title_lower.contains("页面")
-                || title_lower.contains("组件") || title_lower.contains("css");
+            // 路由校验：只检查分析文档中的「标题」行，不检查全文（全文含前后端代码路径会误判）
+            let bug_title_line = content.lines()
+                .find(|l| l.contains("标题") || l.contains("**标题**"))
+                .unwrap_or("")
+                .to_lowercase();
+            let is_backend_bug = bug_title_line.contains("java") || bug_title_line.contains("service")
+                || bug_title_line.contains("mapper") || bug_title_line.contains("sql")
+                || bug_title_line.contains("接口") || bug_title_line.contains("后端")
+                || bug_title_line.contains("数据库") || bug_title_line.contains("api");
+            let is_frontend_bug = bug_title_line.contains("前端") || bug_title_line.contains("vue")
+                || bug_title_line.contains("界面") || bug_title_line.contains("显示")
+                || bug_title_line.contains("弹窗") || bug_title_line.contains("页面")
+                || bug_title_line.contains("组件") || bug_title_line.contains("css");
             let agent_is_backend = self.agent_id == "guanyu";
             let agent_is_frontend = self.agent_id == "zhaoyun";
 
-            if (is_backend_bug && agent_is_frontend) || (is_frontend_bug && agent_is_backend) {
+            // 只有当标题明确匹配且与 agent 类型冲突时才跳过
+            if (is_backend_bug && !is_frontend_bug && agent_is_frontend)
+                || (is_frontend_bug && !is_backend_bug && agent_is_backend) {
                 tracing::warn!("[{}] Bug #{} 类型不匹配（{}: {}），跳过", self.agent_id, bid,
                     if agent_is_frontend { "前端" } else { "后端" },
                     if is_backend_bug { "后端" } else { "前端" });
