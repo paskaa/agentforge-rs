@@ -2182,8 +2182,8 @@ pub fn run_harness_loop(
     };
     
     // ═══ Phase 1: Generator 修复 ═══
-    let harness_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600); // 60分钟总超时
-    tracing::info!("[{}] Bug#{} Harness Loop Phase 1: Generator 修复 (总超时 60min)", agent_name, bug_id);
+    let harness_deadline = std::time::Instant::now() + std::time::Duration::from_secs(7200); // 60分钟总超时
+    tracing::info!("[{}] Bug#{} Harness Loop Phase 1: Generator 修复 (总超时 120min)", agent_name, bug_id);
     let fix_prompt = build_harness_prompt(agent_name, bug_id, bug_title, bug_details);
     let fix_result = codex_exec::codex_exec(
         &fix_prompt, sandbox,

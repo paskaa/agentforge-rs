@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, Condvar, atomic::{AtomicU32, AtomicBool, Ordering}};
+use std::time::Duration;
 use std::time::Instant;
 
 const MAX_CONCURRENT: u32 = 1;
@@ -24,6 +25,49 @@ fn sem_release() {
     SEM_COUNTER.fetch_sub(1, Ordering::SeqCst);
     if let Ok(guard) = SEM_MTX.lock() { SEM_CV.notify_one(); }
 }
+
+/// Redis-based global API lock — ensures only 1 agent calls mimo-code across all processes
+fn api_lock_acquire(agent: &str) -> bool {
+    let client = redis::Client::open("redis://127.0.0.1:16379/").ok();
+    let mut conn = match client.and_then(|c| c.get_connection().ok()) {
+        Some(c) => c,
+        None => { tracing::warn!("[api_lock] Redis unavailable, proceeding without lock"); return true; }
+    };
+    let lock_key = "api_lock:mimo";
+    let lock_val = agent.to_string();
+    let ttl: u64 = 1800; // 30 min TTL
+    for wait_round in 0..120 { // max wait 60 min
+        let acquired: bool = redis::cmd("SET")
+            .arg(lock_key).arg(&lock_val)
+            .arg("NX").arg("EX").arg(ttl)
+            .query(&mut conn).unwrap_or(false);
+        if acquired {
+            tracing::info!("[api_lock] {} acquired API lock", agent);
+            return true;
+        }
+        // Check who holds it
+        let holder: String = redis::cmd("GET").arg(lock_key).query(&mut conn).unwrap_or_default();
+        tracing::info!("[api_lock] {} waiting... lock held by {} (round {}/120)", agent, holder, wait_round + 1);
+        std::thread::sleep(Duration::from_secs(30));
+    }
+    tracing::warn!("[api_lock] {} gave up waiting after 60min", agent);
+    false
+}
+
+fn api_lock_release(agent: &str) {
+    let client = redis::Client::open("redis://127.0.0.1:16379/").ok();
+    let mut conn = match client.and_then(|c| c.get_connection().ok()) {
+        Some(c) => c,
+        None => return,
+    };
+    let lock_key = "api_lock:mimo";
+    let holder: String = redis::cmd("GET").arg(lock_key).query(&mut conn).unwrap_or_default();
+    if holder == agent {
+        let _: Result<(), _> = redis::cmd("DEL").arg(lock_key).query(&mut conn);
+        tracing::info!("[api_lock] {} released API lock", agent);
+    }
+}
+
 struct SemGuard;
 impl Drop for SemGuard { fn drop(&mut self) { sem_release(); } }
 
@@ -61,6 +105,9 @@ pub fn parse_verdict(output: &str) -> Verdict {
 
 pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_name: Option<&str>, timeout_secs: u64) -> CodexExecResult {
     let start = Instant::now();
+    // Redis global lock — only 1 agent at a time across all processes
+    let agent = agent_name.unwrap_or("unknown");
+    let _lock_held = api_lock_acquire(agent);
     sem_acquire();
     let _sem_guard = SemGuard;
     let mimo_bin = std::env::var("MIMO_CODE_PATH").unwrap_or_else(|_| "mimo-code".into());
@@ -69,7 +116,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
     let work_dir = agent_name.map(|a| { let d = format!("/tmp/agentforge-worktrees/{}", a); std::fs::create_dir_all(&d).ok(); d }).map(std::path::PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     tracing::info!("[agent_exec] spawning: {} in {:?}", mimo_bin, work_dir);
     let mut attempt = 0u32;
-    let max_attempts = 5u32;
+    let max_attempts = 10u32;
     let result = loop {
         attempt += 1;
         let mut cmd = Command::new(&mimo_bin);
@@ -91,13 +138,14 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
             tracing::warn!("[agent_exec] stderr: {}", snippet);
         }
         if !exit_success && (stderr.contains("429") || stdout.contains("429")) && attempt < max_attempts {
-            let delay = std::time::Duration::from_secs(60 * attempt as u64);
+            let delay = std::time::Duration::from_secs(120 * (1u64 << attempt.min(5)));
             tracing::warn!("[agent_exec] 429 rate limit, retry {} in {}s", attempt + 1, delay.as_secs());
             std::thread::sleep(delay);
             continue;
         }
         break CodexExecResult { success, final_message: if final_message.is_empty() { stdout.clone() } else { final_message }, verdict, total_tokens, elapsed_ms, stderr };
     };
+    api_lock_release(agent);
     result
 }
 
