@@ -139,8 +139,12 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
         }
         if !exit_success && (stderr.contains("429") || stdout.contains("429")) && attempt < max_attempts {
             let delay = std::time::Duration::from_secs(120 * (1u64 << attempt.min(5)));
-            tracing::warn!("[agent_exec] 429 rate limit, retry {} in {}s", attempt + 1, delay.as_secs());
+            tracing::warn!("[agent_exec] 429 rate limit, retry {} in {}s — releasing lock during wait", attempt + 1, delay.as_secs());
+            // Release lock during retry wait so other agents can use the API
+            api_lock_release(agent);
             std::thread::sleep(delay);
+            // Re-acquire lock before next attempt
+            api_lock_acquire(agent);
             continue;
         }
         break CodexExecResult { success, final_message: if final_message.is_empty() { stdout.clone() } else { final_message }, verdict, total_tokens, elapsed_ms, stderr };
