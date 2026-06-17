@@ -476,21 +476,39 @@ async fn fetch_zentao_stats(_pool: &Option<SqlitePool>) -> ZentaoStats {
     let mut page = 1;
     loop {
         let url = format!("{}/api.php/v1/products/4/bugs?page={}&limit=100", base_url, page);
-        let resp = client.get(&url).header("Token", &token).send().await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                if let Ok(body) = r.json::<serde_json::Value>().await {
-                    let bugs = body.get("bugs").and_then(|b| b.as_array()).cloned().unwrap_or_default();
-                    let total = body.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
-                    all_bugs.extend(bugs);
-                    if all_bugs.len() as i64 >= total { break; }
-                    page += 1;
-                } else { break; }
+        let output = std::process::Command::new("curl")
+            .args(["-s", "-H", &format!("Token: {}", token), "--max-time", "120", &url])
+            .output();
+        match output {
+            Ok(o) => {
+                let body_text = String::from_utf8_lossy(&o.stdout).to_string();
+                tracing::info!("[zentao-fetch] Page {} curl exit={} body_len={}", page, o.status, body_text.len());
+                if body_text.is_empty() {
+                    tracing::warn!("[zentao-fetch] Page {}: empty response", page);
+                    break;
+                }
+                match serde_json::from_str::<serde_json::Value>(&body_text) {
+                    Ok(body) => {
+                        let bugs = body.get("bugs").and_then(|b| b.as_array()).cloned().unwrap_or_default();
+                        let total = body.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
+                        tracing::info!("[zentao-fetch] Page {}: got {} bugs, total={}", page, bugs.len(), total);
+                        all_bugs.extend(bugs);
+                        if all_bugs.len() as i64 >= total { break; }
+                        page += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!("[zentao-fetch] JSON parse error on page {}: {}", page, e);
+                        break;
+                    }
+                }
             }
-            _ => break,
+            Err(e) => {
+                tracing::warn!("[zentao-fetch] curl error on page {}: {}", page, e);
+                break;
+            }
         }
     }
-
+    tracing::info!("[zentao-fetch] Total bugs collected: {}", all_bugs.len());
     let total = all_bugs.len() as i64;
     let mut unclosed = 0i64;
     let mut unresolved = 0i64;
