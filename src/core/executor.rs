@@ -76,14 +76,12 @@ impl AgentExecutor {
         let redis = client.get_multiplexed_async_connection().await?;
         let redis_sync = Arc::new(Mutex::new(client.get_connection()?));
         let is_fixer = FIXERS.contains(&agent_id);
-        let fix_stream = if agent_id == "liubei" { "agent-work-queue:coordinator".into() }
-        else if is_fixer { format!("agent-work-queue:fix:{}", agent_id) }
-        else { "agent-work-queue".into() };
+        let fix_stream = format!("agent-work-queue:fix:{}", agent_id);
         let llm = LlmClient::new(&config.llm.api_base, &config.llm.api_key, agent_cfg.model.as_deref().unwrap_or(&config.llm.default_model));
         let feishu = FeishuClient::new(&config.feishu.app_id, &config.feishu.app_secret, &config.feishu.group_chat_id);
         let traces = Arc::new(TraceStore::open(std::path::Path::new("/var/lib/agentforge/traces.db")).await?);
         Ok(Self { agent_id: agent_id.into(), agent_name, redis, redis_sync, llm, feishu, traces, fix_stream, is_fixer,
-            last_coordinator_scan: Instant::now(), last_retry_check: Instant::now(), last_analysis_scan: Instant::now(), last_stream_id: "$".into(),
+            last_coordinator_scan: Instant::now(), last_retry_check: Instant::now(), last_analysis_scan: Instant::now(), last_stream_id: "0-0".into(),
             zentao_dir: "/root/.openclaw/extensions/zentao-token-refresh".into() })
     }
 
@@ -153,11 +151,7 @@ impl AgentExecutor {
                 self.scan_analysis_docs().await;
             }
 
-            let val = if self.is_fixer {
-                self.blpop_val().await
-            } else {
-                self.xread_val().await
-            };
+            let val = self.blpop_val().await;
             let Some(val) = val else { continue };
 
             let task = match serde_json::from_str::<Task>(&val) {
@@ -380,9 +374,18 @@ impl AgentExecutor {
     async fn xread_val(&mut self) -> Option<String> {
         let stream = self.fix_stream.clone();
         let last_id = self.last_stream_id.clone();
+        { let _ = std::fs::write("/tmp/xread_debug.log", format!("agent={} stream={} last_id={}
+", self.agent_id, stream, last_id)); }
         let opts = redis::streams::StreamReadOptions::default().count(1).block(10000);
         let read: redis::RedisResult<Vec<redis::streams::StreamReadReply>> = self.redis.clone()
             .xread_options(&[stream.as_str()], &[&last_id], &opts).await;
+        match &read {
+            Ok(replies) => {
+                let total: usize = replies.iter().map(|r| r.keys.iter().map(|k| k.ids.len()).sum::<usize>()).sum();
+                eprintln!("[XREAD_DEBUG] agent={} got {} entries", self.agent_id, total);
+            }
+            Err(e) => eprintln!("[XREAD_DEBUG] agent={} ERROR: {}", self.agent_id, e),
+        }
         if let Ok(replies) = read {
             for reply in &replies {
                 for key in &reply.keys {
@@ -421,6 +424,30 @@ impl AgentExecutor {
                 let task_json = pipeline::build_fix_task(bid, title, fixer);
                 let queue = format!("agent-work-queue:fix:{}", fixer);
                 self.push_task_dedup(&queue, &task_json.to_string()).await;
+                // 铁律: 新 Bug 必须先经诸葛亮分析再派给 Fixer
+                if self.agent_id == "liubei" {
+                    // 跳过已有分析文档或已在分析队列的 Bug
+                    let analysis_key = format!("analysis_sent:{}", bid);
+                    let already_analyzing: bool = self.redis.clone().exists(&analysis_key).await.unwrap_or(false);
+                    let analysis_path = format!("/tmp/agentforge-worktrees/zhugeliang/MD/bugs/BUG_{}_ANALYSIS.md", bid);
+                    let has_analysis = std::path::Path::new(&analysis_path).exists();
+                    if already_analyzing || has_analysis {
+                        tracing::info!("[liubei] ⏭ Bug #{} 已有分析或在分析中，跳过", bid);
+                    } else {
+                        let _: redis::RedisResult<()> = self.redis.clone().set_ex(&analysis_key, "1", 3600).await;
+                        let pre_analyze = serde_json::json!({
+                        "agent_id": "zhugeliang",
+                        "message": format!("请分析 Bug #{}：{}。建议修复 Agent: {}", bid, title, fixer),
+                        "source": "pipeline_pre_analyze",
+                        "sender_id": "liubei",
+                        "msg_id": format!("pre-analyze-{}-{}", bid, chrono::Local::now().timestamp()),
+                        "timestamp": chrono::Local::now().format("%-Y-%m-%dT%H:%M:%S").to_string(),
+                        "chat_id": "", "is_dm": "true",
+                    });
+                        let _: redis::RedisResult<i64> = self.redis.clone().rpush("agent-work-queue:fix:zhugeliang", pre_analyze.to_string()).await;
+                        tracing::info!("[liubei] 📤 Bug #{} 已派给诸葛亮分析", bid);
+                    }
+                }
             }
         }
         // liubei is the sole coordinator — dispatch to subagents
@@ -461,6 +488,13 @@ impl AgentExecutor {
     }
 
     async fn handle_fix_task(&self, msg: &str) {
+        // ── Trigger: "分配" → coordinator scan (before bug_id check) ──
+        if msg.contains("分配") && (self.agent_id == "liubei" || self.agent_id == "zhugeliang") {
+            tracing::info!("[{}] 🎯 Pipeline triggered: 分配Bug", self.agent_id);
+            let _ = self.feishu.send("🔍 收到分配指令，正在扫描 Bug...", None).await;
+            self.run_coordinator_scan().await;
+            return;
+        }
         let bug_id = pipeline::parse_bugs_from_message(msg).first().map(|(b,_)| b.clone()).unwrap_or_default();
         if bug_id.is_empty() { return; }
         // ── 铁律: 检查禅道 Bug 状态 — 已关闭/已解决的 Bug 禁止处理 ──
