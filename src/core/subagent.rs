@@ -173,7 +173,7 @@ fn build_harness_prompt(agent_name: &str, bug_id: &str, bug_title: &str, bug_det
     
     // 加载统一铁律文件
     let iron_laws_full = load_skill("/root/.codex/rules/IRON_LAWS.md");
-    let iron_laws = iron_laws_full.chars().take(3000).collect::<String>();
+    let iron_laws = iron_laws_full.chars().take(12000).collect::<String>();
 
     // 加载模块索引（铁律：修复人员必须读模块索引快速定位）
     let module_index_full = load_skill("/root/.openclaw/workspace/his-repo/MD/MODULE_INDEX.md");
