@@ -374,18 +374,9 @@ impl AgentExecutor {
     async fn xread_val(&mut self) -> Option<String> {
         let stream = self.fix_stream.clone();
         let last_id = self.last_stream_id.clone();
-        { let _ = std::fs::write("/tmp/xread_debug.log", format!("agent={} stream={} last_id={}
-", self.agent_id, stream, last_id)); }
         let opts = redis::streams::StreamReadOptions::default().count(1).block(10000);
         let read: redis::RedisResult<Vec<redis::streams::StreamReadReply>> = self.redis.clone()
             .xread_options(&[stream.as_str()], &[&last_id], &opts).await;
-        match &read {
-            Ok(replies) => {
-                let total: usize = replies.iter().map(|r| r.keys.iter().map(|k| k.ids.len()).sum::<usize>()).sum();
-                eprintln!("[XREAD_DEBUG] agent={} got {} entries", self.agent_id, total);
-            }
-            Err(e) => eprintln!("[XREAD_DEBUG] agent={} ERROR: {}", self.agent_id, e),
-        }
         if let Ok(replies) = read {
             for reply in &replies {
                 for key in &reply.keys {
