@@ -27,34 +27,37 @@ fn sem_release() {
 }
 
 /// Redis-based global API lock — ensures only 1 agent calls mimo-code across all processes
-fn api_lock_acquire(agent: &str) -> bool {
+fn api_lock_acquire(agent: &str) -> String {
     let client = redis::Client::open("redis://127.0.0.1:16379/").ok();
     let mut conn = match client.and_then(|c| c.get_connection().ok()) {
         Some(c) => c,
-        None => { tracing::warn!("[api_lock] Redis unavailable, proceeding without lock"); return true; }
+        None => { tracing::warn!("[api_lock] Redis unavailable, proceeding without lock"); return "bypass".into(); }
     };
     let lock_key = "api_lock:mimo";
-    let lock_val = agent.to_string();
+    // Unique lock value per invocation: agent + random suffix
+    let lock_id = format!("{}:{}", agent, rand_id());
     let ttl: u64 = 1800; // 30 min TTL
     for wait_round in 0..120 { // max wait 60 min
         let acquired: bool = redis::cmd("SET")
-            .arg(lock_key).arg(&lock_val)
+            .arg(lock_key).arg(&lock_id)
             .arg("NX").arg("EX").arg(ttl)
             .query(&mut conn).unwrap_or(false);
         if acquired {
-            tracing::info!("[api_lock] {} acquired API lock", agent);
-            return true;
+            tracing::info!("[api_lock] {} acquired API lock (id={})", agent, lock_id);
+            return lock_id;
         }
         // Check who holds it
         let holder: String = redis::cmd("GET").arg(lock_key).query(&mut conn).unwrap_or_default();
-        tracing::info!("[api_lock] {} waiting... lock held by {} (round {}/120)", agent, holder, wait_round + 1);
+        let holder_agent = holder.split(':').next().unwrap_or("?");
+        tracing::info!("[api_lock] {} waiting... lock held by {} (round {}/120)", agent, holder_agent, wait_round + 1);
         std::thread::sleep(Duration::from_secs(30));
     }
     tracing::warn!("[api_lock] {} gave up waiting after 60min", agent);
-    false
+    "gave_up".into()
 }
 
-fn api_lock_release(agent: &str) {
+fn api_lock_release(lock_id: &str) {
+    if lock_id == "bypass" || lock_id == "gave_up" { return; }
     let client = redis::Client::open("redis://127.0.0.1:16379/").ok();
     let mut conn = match client.and_then(|c| c.get_connection().ok()) {
         Some(c) => c,
@@ -62,10 +65,16 @@ fn api_lock_release(agent: &str) {
     };
     let lock_key = "api_lock:mimo";
     let holder: String = redis::cmd("GET").arg(lock_key).query(&mut conn).unwrap_or_default();
-    if holder == agent {
+    if holder == lock_id {
         let _: Result<(), _> = redis::cmd("DEL").arg(lock_key).query(&mut conn);
-        tracing::info!("[api_lock] {} released API lock", agent);
+        tracing::info!("[api_lock] released API lock (id={})", lock_id);
     }
+}
+
+fn rand_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("{:x}", t)
 }
 
 struct SemGuard;
@@ -107,7 +116,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
     let start = Instant::now();
     // Redis global lock — only 1 agent at a time across all processes
     let agent = agent_name.unwrap_or("unknown");
-    let _lock_held = api_lock_acquire(agent);
+    let mut _lock_id = api_lock_acquire(agent);
     sem_acquire();
     let _sem_guard = SemGuard;
     let mimo_bin = std::env::var("MIMO_CODE_PATH").unwrap_or_else(|_| "mimo-code".into());
@@ -140,16 +149,16 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>, agent_
         if !exit_success && (stderr.contains("429") || stdout.contains("429")) && attempt < max_attempts {
             let delay = std::time::Duration::from_secs(120 * (1u64 << attempt.min(5)));
             tracing::warn!("[agent_exec] 429 rate limit, retry {} in {}s — releasing lock during wait", attempt + 1, delay.as_secs());
-            // Release lock during retry wait so other agents can use the API
-            api_lock_release(agent);
+            // Release lock during retry — unique lock_id prevents self-deadlock
+            api_lock_release(&_lock_id);
             std::thread::sleep(delay);
             // Re-acquire lock before next attempt
-            api_lock_acquire(agent);
+            _lock_id = api_lock_acquire(agent);
             continue;
         }
         break CodexExecResult { success, final_message: if final_message.is_empty() { stdout.clone() } else { final_message }, verdict, total_tokens, elapsed_ms, stderr };
     };
-    api_lock_release(agent);
+    api_lock_release(&_lock_id);
     result
 }
 
