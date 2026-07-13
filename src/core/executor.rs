@@ -1873,15 +1873,27 @@ impl AgentExecutor {
             .current_dir(&worktree_dir)
             .args(["checkout", "--", "."])
             .output();
-        // 拉取最新
+        // 拉取最新 all branches（只 fetch develop 不会更新 origin/develop 跟踪分支）
         let _ = std::process::Command::new("git")
             .current_dir(&worktree_dir)
-            .args(["fetch", "origin", "develop"])
+            .args(["fetch", "origin"])
             .output();
-        let _ = std::process::Command::new("git")
+        // rebase 到最新 develop，确保可以 fast-forward push
+        let rebase_out = std::process::Command::new("git")
             .current_dir(&worktree_dir)
             .args(["rebase", "origin/develop"])
             .output();
+        let rebase_ok = match &rebase_out {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        };
+        if !rebase_ok {
+            tracing::warn!("[zhugeliang] rebase 失败，尝试 pull --rebase");
+            let _ = std::process::Command::new("git")
+                .current_dir(&worktree_dir)
+                .args(["pull", "--rebase", "origin", "develop"])
+                .output();
+        }
         // 只 add 分析文件（-f 强制添加，不影响其他文件）
         let add_out = std::process::Command::new("git")
             .current_dir(&worktree_dir)

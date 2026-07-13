@@ -641,7 +641,7 @@ fn validate_mapper_sql(agent_name: &str, work_dir: &str, bug_id: &str) -> bool {
 fn check_previous_fix(bug_id: &str) -> String {
     let main_repo = "/root/.openclaw/workspace/his-repo";
     let _ = Command::new("git")
-        .args(["-C", main_repo, "fetch", "origin", "develop"]).output();
+        .args(["-C", main_repo, "fetch", "origin"]).output();
     
     // Check for both new and old commit message formats
     let output = Command::new("git")
@@ -851,7 +851,7 @@ fn run_opencode_fix_impl(
         }
     }
     // 同步 develop 最新代码（fix commit 在 develop 上，worktree 需要合并）
-    let _ = Command::new("git").args(["-C", &worktree, "fetch", "origin", "develop"]).output();
+    let _ = Command::new("git").args(["-C", &worktree, "fetch", "origin"]).output();
     let merge_result = Command::new("git")
         .args(["-C", &worktree, "merge", "origin/develop", "--no-edit", "-X", "theirs"])
         .output();
@@ -875,7 +875,7 @@ fn run_opencode_fix_impl(
     // Step 4: Launch opencode
     // Uses opencode run which reads prompt from stdin
     let mut child = match Command::new("opencode")
-        .args(["run", "--agent", agent_name, "--pure", "--print-logs", "-"])
+        .args(["run", "--agent", agent_name, "--print-logs", "-"])
         .current_dir(&work_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1306,7 +1306,7 @@ fn push_and_merge_to_develop(agent_name: &str, bug_id: &str) {
 
     // Cherry-pick to develop
     let main_repo = "/root/.openclaw/workspace/his-repo";
-    let _ = Command::new("git").args(["-C", main_repo, "fetch", "origin", "develop"]).output();
+    let _ = Command::new("git").args(["-C", main_repo, "fetch", "origin"]).output();
     let _ = Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
     let _ = Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
 
@@ -1526,7 +1526,7 @@ fn auto_commit_fix(agent_name: &str, bug_id: &str, bug_title: &str, stdout: &str
                 if !hash.is_empty() && hash.len() >= 8 {
                     let main_repo = "/root/.openclaw/workspace/his-repo";
                     let _ = Command::new("git")
-                        .args(["-C", main_repo, "fetch", "origin", "develop"])
+                        .args(["-C", main_repo, "fetch", "origin"])
                         .output();
                     let _ = Command::new("git")
                         .args(["-C", main_repo, "checkout", "develop"])
@@ -2219,7 +2219,7 @@ pub fn run_harness_loop(
     // ═══ 同步 worktree 到最新 develop ═══
     let worktree = format!("/tmp/agentforge-worktrees/{}", agent_name);
     let _ = Command::new("git").args(["-C", &worktree, "stash", "--include-untracked"]).output();
-    let _ = Command::new("git").args(["-C", &worktree, "fetch", "origin", "develop"]).output();
+    let _ = Command::new("git").args(["-C", &worktree, "fetch", "origin"]).output();
     let merge_result = Command::new("git")
         .args(["-C", &worktree, "merge", "origin/develop", "--no-edit", "-X", "theirs"])
         .output();
@@ -2582,7 +2582,7 @@ pub fn run_harness_loop(
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
         if !fix_hash.is_empty() && fix_hash.len() >= 8 {
-            let _ = std::process::Command::new("git").args(["-C", main_repo, "fetch", "origin", "develop"]).output();
+            let _ = std::process::Command::new("git").args(["-C", main_repo, "fetch", "origin"]).output();
             let _ = std::process::Command::new("git").args(["-C", main_repo, "checkout", "develop"]).output();
             let _ = std::process::Command::new("git").args(["-C", main_repo, "pull", "--rebase", "origin", "develop"]).output();
             let author = format!("{} <{}@gentronhealth.com>", agent_name, agent_name);

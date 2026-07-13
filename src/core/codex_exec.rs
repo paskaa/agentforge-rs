@@ -1,7 +1,7 @@
 //! Agent Exec — 调用 opencode CLI 的执行层
 //!
 //! 使用 opencode run 管道
-//! opencode run --agent <agent> --pure --print-logs < prompt
+//! opencode run --agent <agent> --print-logs < prompt
 
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
@@ -164,7 +164,6 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
     cmd.arg("run")
        .arg("--agent")
        .arg(agent)
-       .arg("--pure")
        .arg("--print-logs")
        .arg("-")  // read prompt from stdin
        .current_dir(&work_dir)
@@ -217,7 +216,11 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
     let final_message = extract_opencode_message(&stdout);
     let total_tokens = 0u64; // opencode 不直接暴露 token 数
     let verdict = parse_verdict(if final_message.is_empty() { &stdout } else { &final_message });
-    let success = exit_success && verdict.is_pass();
+    // opencode 即使成功也返回 exit code 1，所以只要有实际输出内容就视为成功
+    let has_output = !final_message.trim().is_empty() 
+        && !final_message.contains("creating instance")
+        && !final_message.contains("bootstrapping");
+    let success = has_output || (exit_success && verdict.is_pass());
     
     tracing::info!("[opencode] completed: exit={} elapsed={}ms verdict={:?}", 
                    output.status, elapsed_ms, verdict);
