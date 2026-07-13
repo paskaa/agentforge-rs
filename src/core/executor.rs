@@ -616,7 +616,7 @@ impl AgentExecutor {
 
                 let attempt_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     tokio::task::block_in_place(|| {
-                        subagent::run_codex_fix_v2(&an, &bid, &m, 0)
+                        subagent::run_opencode_fix_v2(&an, &bid, &m, 0)
                     })
                 })) {
                     Ok(r) => r,
@@ -1038,7 +1038,31 @@ impl AgentExecutor {
                         evidence_list
                     );
                     let _ = client.comment_bug(&bid, &test_report).await;
-                    let _ = client.resolve_bug(&bid, "Playwright回归测试通过，BUG已修复").await;
+                    // 二次检查：防止人类在测试通过后手动关闭 bug
+                    {
+                        let cfg_check = crate::config::Config::load().ok();
+                        if let Some(ref cfg) = cfg_check {
+                            let zc = crate::core::zentao::ZentaoClient::from_config(cfg);
+                            let rt = tokio::runtime::Handle::current();
+                            match rt.block_on(zc.get_bug(&bid)) {
+                                Ok(detail) => {
+                                    let st = detail.status.as_str();
+                                    if st == "resolved" || st == "closed" || st == "done" {
+                                        tracing::warn!("[zhangfei] Bug #{} 已被人类关闭/解决(status={})，跳过 resolve", bid, st);
+                                    } else {
+                                        let _ = client.resolve_bug(&bid, "Playwright回归测试通过，BUG已修复").await;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("[zhangfei] Bug #{} 状态检查失败({})，保守执行 resolve", bid, e);
+                                    let _ = client.resolve_bug(&bid, "Playwright回归测试通过，BUG已修复").await;
+                                }
+                            }
+                        } else {
+                            // 无法加载配置，保守执行 resolve
+                            let _ = client.resolve_bug(&bid, "Playwright回归测试通过，BUG已修复").await;
+                        }
+                    }
                 }
             }
 
@@ -1214,8 +1238,33 @@ impl AgentExecutor {
                 bid, rep
             );
             let _ = client.comment_bug(&bid, &verify_comment).await;
-            let _ = client.resolve_bug(&bid, "验收通过").await;
-            let _ = client.assign_bug(&bid, &rep, "验收通过，分配给提出人确认").await;
+            // 二次检查：防止人类在验收通过后手动关闭 bug
+            {
+                let cfg_check = crate::config::Config::load().ok();
+                if let Some(ref cfg) = cfg_check {
+                    let zc = crate::core::zentao::ZentaoClient::from_config(cfg);
+                    let rt = tokio::runtime::Handle::current();
+                    match rt.block_on(zc.get_bug(&bid)) {
+                        Ok(detail) => {
+                            let st = detail.status.as_str();
+                            if st == "resolved" || st == "closed" || st == "done" {
+                                tracing::warn!("[huatuo] Bug #{} 已被人类关闭/解决(status={})，跳过 resolve", bid, st);
+                            } else {
+                                let _ = client.resolve_bug(&bid, "验收通过").await;
+                                let _ = client.assign_bug(&bid, &rep, "验收通过，分配给提出人确认").await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("[huatuo] Bug #{} 状态检查失败({})，保守执行 resolve", bid, e);
+                            let _ = client.resolve_bug(&bid, "验收通过").await;
+                            let _ = client.assign_bug(&bid, &rep, "验收通过，分配给提出人确认").await;
+                        }
+                    }
+                } else {
+                    let _ = client.resolve_bug(&bid, "验收通过").await;
+                    let _ = client.assign_bug(&bid, &rep, "验收通过，分配给提出人确认").await;
+                }
+            }
         }
         let verify_verdict = Verdict::Pass;
         let _ = self.feishu.send(&format!("✅ Bug #{} VERDICT: PASS (验收通过)。", bid), None).await;
@@ -1765,7 +1814,7 @@ impl AgentExecutor {
             "# Bug #{} 诸葛亮分析报告\n\n\
              > **文档类型**: Bug分析\n\
              > **分析时间**: {}\n\
-             > **分析模型**: mimo-v2.5 (LLM深度分析)\n\n\
+             > **分析模型**: agnes-2.0-flash (LLM深度分析)\n\n\
              ---\n\n\
              ## 基本信息\n\
              - **Bug #**: {}\n\

@@ -92,7 +92,7 @@ impl LlmClient {
             coding_model: "qwen-coder-plus".into(),
             simple_model: "qwen-turbo".into(),
             analysis_model: "qwen-plus".into(),
-            vision_model: "mimo-v2.5".into(),
+            vision_model: "agnes-2.0-flash".into(),
         }
     }
 

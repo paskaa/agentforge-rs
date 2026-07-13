@@ -117,7 +117,7 @@ impl Default for RedisConfig {
     }
 }
 fn default_vision_model() -> String {
-    "mimo-v2.5".into()
+    "agnes-2.0-flash".into()
 }
 
 fn default_zentao_cli() -> String {
