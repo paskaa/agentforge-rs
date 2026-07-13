@@ -1845,7 +1845,7 @@ impl AgentExecutor {
             } else { true }
         } else { true };
         if should_write {
-            // 过滤掉 mimo-code 连接错误日志，只保留实际分析内容
+            // 过滤掉连接错误日志，只保留实际分析内容
             let cleaned_content: String = archive_content.lines()
                 .filter(|l| !l.contains("Reconnecting..."))
                 .filter(|l| !l.contains("stream disconnected before completion"))

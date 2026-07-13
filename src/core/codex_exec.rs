@@ -1,7 +1,7 @@
-//! Agent Exec — 调用 codex-aliyun CLI 的执行层
+//! Agent Exec — 调用 opencode CLI 的执行层
 //!
-//! 使用 codex-aliyun → mimo2codex → MIMOMO API 管道
-//! codex-aliyun exec --sandbox workspace-write --stdin "-"
+//! 使用 opencode run 管道
+//! opencode run --agent <agent> --pure --print-logs < prompt
 
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
@@ -154,19 +154,19 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
     }).map(std::path::PathBuf::from)
     .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     
-    tracing::info!("[codex-aliyun] spawning: agent={} dir={:?}", agent, work_dir);
+    tracing::info!("[opencode] spawning: agent={} dir={:?}", agent, work_dir);
     
     sem_acquire();
     let _sem_guard = SemGuard;
     
-    // 构建 codex-aliyun 命令（使用 codex CLI 通过 mimo2codex 代理调用 MIMOMO API）
-    let mut cmd = Command::new("codex-aliyun");
-    cmd.arg("exec")
-       .arg("--sandbox")
-       .arg("workspace-write")
-       .arg("--dangerously-bypass-approvals-and-sandbox")
-       .arg("--skip-git-repo-check")
-       .arg("-")
+    // 构建 opencode 命令
+    let mut cmd = Command::new("opencode");
+    cmd.arg("run")
+       .arg("--agent")
+       .arg(agent)
+       .arg("--pure")
+       .arg("--print-logs")
+       .arg("-")  // read prompt from stdin
        .current_dir(&work_dir)
        .stdin(Stdio::piped())
        .stdout(Stdio::piped())
@@ -178,7 +178,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
             sem_release();
             return CodexExecResult {
                 success: false,
-                final_message: format!("codex-aliyun spawn failed: {}", e),
+                final_message: format!("opencode run failed: {}", e),
                 verdict: Verdict::Fail(format!("spawn: {}", e)),
                 total_tokens: 0,
                 elapsed_ms: start.elapsed().as_millis() as u64,
@@ -191,6 +191,8 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         let _ = stdin.write_all(full_task.as_bytes());
+        // opencode 需要关闭 stdin 才能开始处理
+        drop(stdin);
     }
     
     let output = match child.wait_with_output() {
@@ -199,7 +201,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
             sem_release();
             return CodexExecResult {
                 success: false,
-                final_message: format!("codex-aliyun wait failed: {}", e),
+                final_message: format!("opencode run wait failed: {}", e),
                 verdict: Verdict::Fail(format!("wait: {}", e)),
                 total_tokens: 0,
                 elapsed_ms: start.elapsed().as_millis() as u64,
@@ -217,7 +219,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
     let verdict = parse_verdict(if final_message.is_empty() { &stdout } else { &final_message });
     let success = exit_success && verdict.is_pass();
     
-    tracing::info!("[codex-aliyun] completed: exit={} elapsed={}ms verdict={:?}", 
+    tracing::info!("[opencode] completed: exit={} elapsed={}ms verdict={:?}", 
                    output.status, elapsed_ms, verdict);
     
     if !stderr.is_empty() {
@@ -235,7 +237,7 @@ pub fn codex_exec(task: &str, _sandbox: &str, _schema_path: Option<&str>,
     }
 }
 
-/// 批量执行多个任务
+/// 批量执行多个任务（使用 opencode run）
 pub fn codex_exec_pipeline(tasks: &[(String, String)], _sandbox: &str, _timeout_secs: u64) -> Vec<CodexExecResult> {
     tasks.iter()
          .map(|(agent, task)| codex_exec(task, "read-only", None, Some(agent), 3600))

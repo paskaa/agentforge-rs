@@ -4,7 +4,7 @@
 //! When invoked, the prompt includes the full Harness Engineering
 //! methodology (Init → Plan → Implement → Verify → Cleanup) via loaded skills.
 //!
-//! All fix invocations go through `codex-aliyun` → `mimo2codex` → `codex` pipeline.
+//! All fix invocations go through `opencode run` pipeline.
 
 use std::process::Command;
 use std::time::Instant;
@@ -872,12 +872,10 @@ fn run_opencode_fix_impl(
         }
     }
 
-    // Step 4: Launch codex via mimo2codex pipeline
-    // Uses codex-aliyun which: (1) starts mimo2codex if needed, (2) runs codex with mimo model
-    let mut child = match Command::new("codex-aliyun")
-        .args(["exec", "--sandbox", "workspace-write",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check", "-"])
+    // Step 4: Launch opencode
+    // Uses opencode run which reads prompt from stdin
+    let mut child = match Command::new("opencode")
+        .args(["run", "--agent", agent_name, "--pure", "--print-logs", "-"])
         .current_dir(&work_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -885,27 +883,15 @@ fn run_opencode_fix_impl(
         .spawn() {
         Ok(c) => c,
         Err(e) => {
-            // Fallback to raw codex if codex-aliyun not found
-            tracing::warn!("codex-aliyun not found ({}), falling back to codex", e);
-            match Command::new("codex")
-                .args(["exec", "--sandbox", "workspace-write",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--skip-git-repo-check", "-"])
-                .current_dir(&work_dir)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn() {
-                Ok(c) => c,
-                Err(e2) => return CodexResult {
-                    success: false, bug_id: bug_id.to_string(),
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    stdout: String::new(),
-                    stderr: format!("codex spawn failed: {}", e2),
-                    exit_code: -1, changes: 0,
+            tracing::warn!("opencode not found ({}), falling back to v2", e);
+            return CodexResult {
+                success: false, bug_id: bug_id.to_string(),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                stdout: String::new(),
+                stderr: format!("opencode spawn failed: {}", e),
+                exit_code: -1, changes: 0,
                 last_phase: "generator".to_string(), phase_verdicts: vec![],
-                },
-            }
+            };
         }
     };
 
@@ -928,7 +914,7 @@ fn run_opencode_fix_impl(
                 if commit_changes > 0 { changes = commit_changes; }
             }
             // ── 问题1: 空输出检测 ──
-            // codex 超时/崩溃时 stdout 为空或极短，不应计为成功
+            // opencode 超时/崩溃时 stdout 为空或极短，不应计为成功
             let stdout_trimmed = stdout.trim();
             let is_empty_output = stdout_trimmed.is_empty() || stdout_trimmed.len() < 20;
             let is_analysis_only = stdout_trimmed.contains("分析") && !stdout_trimmed.contains("修复")
@@ -2134,7 +2120,7 @@ pub fn fmt_duration(seconds: f64) -> String {
 
 /// 使用 opencode CLI 直接调用的修复函数 (v2)
 /// 
-/// 替代 codex-aliyun → mimo2codex → codex 管道
+/// 替代 opencode run 管道
 /// 直接使用 opencode run --agent <name> --message "<prompt>" CLI
 /// 现在委托给 run_harness_loop 执行完整的 4 阶段循环
 pub fn run_opencode_fix_v2(
