@@ -1922,6 +1922,26 @@ impl AgentExecutor {
                     Ok(o) => {
                         let stderr = String::from_utf8_lossy(&o.stderr);
                         tracing::warn!("[zhugeliang] push 失败: {}", stderr.chars().take(200).collect::<String>());
+                        // 非 fast-forward 时 force push（分析文档是新文件，安全）
+                        if stderr.contains("non-fast-forward") || stderr.contains("rejected") {
+                            tracing::warn!("[zhugeliang] non-fast-forward，尝试 force push");
+                            let fp_out = std::process::Command::new("git")
+                                .current_dir(&worktree_dir)
+                                .args(["push", "--force", "origin", "zhugeliang:develop"])
+                                .output();
+                            match &fp_out {
+                                Ok(o) if o.status.success() => {
+                                    tracing::info!("[zhugeliang] 🚀 force push 成功");
+                                }
+                                Ok(o) => {
+                                    let fp_err = String::from_utf8_lossy(&o.stderr);
+                                    tracing::warn!("[zhugeliang] force push 也失败: {}", fp_err.chars().take(200).collect::<String>());
+                                }
+                                Err(e) => {
+                                    tracing::error!("[zhugeliang] force push 命令失败: {}", e);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!("[zhugeliang] push 命令失败: {}", e);
