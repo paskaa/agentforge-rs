@@ -1605,8 +1605,10 @@ impl AgentExecutor {
 
         tracing::info!("[zhugeliang] 🔍 深度分析 Bug #{} (建议: {})", bid, suggested_fixer);
 
-        // Step 1: 获取 Bug 详情（完整复刻禅道内容）
+        // Step 1: 获取 Bug 详情（先刷新 token 避免 401）
         let cfg = crate::config::Config::load().ok();
+        // 刷新 token
+        crate::core::zentao::ZentaoClient::refresh_token_if_needed();
         let (bug_title, bug_full_text, bug_module, _reporter) = if let Some(ref cfg) = cfg {
             let client = crate::core::zentao::ZentaoClient::from_config(cfg);
             match client.get_bug(&bid).await {

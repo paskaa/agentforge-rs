@@ -141,7 +141,7 @@ impl ZentaoClient {
         "".to_string()
     }
 
-    /// 获取 Bug 详情
+    /// 获取 Bug 详情（401 时自动刷新 token）
     pub async fn get_bug(&self, bug_id: &str) -> anyhow::Result<BugDetail> {
         let url = format!("{}/api.php/v1/bugs/{}", self.base_url, bug_id);
         let resp = self.client.get(&url)
@@ -149,12 +149,74 @@ impl ZentaoClient {
             .send()
             .await?;
 
+        if resp.status() == 401 {
+            tracing::warn!("[zentao] Token expired, refreshing...");
+            if let Some(new_token) = Self::refresh_token() {
+                let resp2 = self.client.get(&url)
+                    .header("Token", &new_token)
+                    .send()
+                    .await?;
+                if resp2.status().is_success() {
+                    let api_resp: ZentaoBugResponse = resp2.json().await?;
+                    return Ok(BugDetail::from_api(api_resp));
+                }
+            }
+            anyhow::bail!("Zentao API error: HTTP 401 (token expired)");
+        }
+
         if !resp.status().is_success() {
             anyhow::bail!("Zentao API error: HTTP {}", resp.status());
         }
 
         let api_resp: ZentaoBugResponse = resp.json().await?;
         Ok(BugDetail::from_api(api_resp))
+    }
+
+    /// 通过 CLI 登录刷新 token（在调用 get_bug 前也可主动调用）
+    pub fn refresh_token_if_needed() {
+        let _ = Self::refresh_token();
+    }
+
+    /// 刷新 Zentao token（通过 CLI 登录 + 更新 .env）
+    pub fn refresh_token() -> Option<String> {
+        use std::process::Command;
+        let login = Command::new("zentao")
+            .args(["login", "-s", "https://zentao.gentronhealth.com",
+                   "-u", "zhangfei", "-p", "Gentron@2025"])
+            .output();
+        match login {
+            Ok(o) if o.status.success() => {
+                tracing::info!("[zentao] CLI login 成功");
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!("[zentao] CLI login 失败: {}", stderr.chars().take(200).collect::<String>());
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!("[zentao] CLI login 命令失败: {}", e);
+                return None;
+            }
+        }
+        let path = std::path::Path::new("/root/.config/zentao/zentao.json");
+        if !path.exists() { return None; }
+        let content = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        if let Some(profiles) = json["profiles"].as_array() {
+            for p in profiles {
+                if p["account"].as_str() == Some("zhangfei") {
+                    if let Some(token) = p["token"].as_str() {
+                        let env_path = "/root/.config/zentao/.env";
+                        let _ = std::fs::write(env_path, format!(
+                            "ZENTAO_URL=https://zentao.gentronhealth.com\nZENTAO_TOKEN={}\n\n", token
+                        ));
+                        tracing::info!("[zentao] Token refreshed: {}...", &token[..8]);
+                        return Some(token.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// 获取指定用户的活跃 Bug 列表
